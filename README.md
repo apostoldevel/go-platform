@@ -14,5 +14,9 @@ Planned packages (contract first, code after it is signed):
   arguments of `api.sql()`.
 - `openapi` — OpenAPI 3.1 from the module's types.
 
+License: MIT.
+
 Module path: `github.com/apostoldevel/go-platform`. Consumed by a project as a git submodule
 (`go/platform`), the way `db-platform` is consumed as `db/sql/platform`.
+
+License: MIT.
