@@ -68,7 +68,7 @@ type Config struct {
 	Prefixes   []string
 	Capacity   int
 
-	// Token returns a service token of the gateway audience; called on every
+	// Token returns the service token the gateway accepts; called on every
 	// (re)connection, so it may refresh.
 	Token func(ctx context.Context) (string, error)
 	// InFlight reports requests currently being served (heartbeat, /ping, drain).
