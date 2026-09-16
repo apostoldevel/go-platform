@@ -152,6 +152,36 @@ func TestUnknownRoute_404_ProblemJSON(t *testing.T) {
 	}
 }
 
+// url.Values from r.URL.Query() drops a pair it cannot unescape and says
+// nothing; a filter that disappears turns a selection into "everything"
+// (T302 remark from the live run of T303). A query the host cannot parse is
+// the client's error, before any route.
+func TestMalformedQuery_400_BeforeAnyRoute(t *testing.T) {
+	var seen pgtx.Session
+	h := host(t, platform.Config{}, fake{name: "x", pref: []string{"/api/v2/x"}, seen: &seen})
+	rec := do(h, "GET", "/api/v2/x?filter[username][like]=t303-probe-%&page[limit]=100", map[string]string{"Authorization": "Bearer " + token("s")})
+	if rec.Code != 400 {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	if p := problemOf(t, rec); p["type"] != "urn:apostol:error:validation" || !strings.Contains(p["detail"].(string), "escape") {
+		t.Fatal(p)
+	}
+	if seen.Code != "" {
+		t.Fatal("the route was reached")
+	}
+	// a raw ";" is refused too (net/url since 1.17): before, the pair was
+	// dropped just as silently — the client encodes it as %3B
+	if rec := do(h, "GET", "/api/v2/x?filter[note][like]=a;b", map[string]string{"Authorization": "Bearer " + token("s")}); rec.Code != 400 {
+		t.Fatalf("semicolon: %d %s", rec.Code, rec.Body)
+	}
+	// a well-formed query still passes, encoded or not
+	for _, q := range []string{"?filter[username][like]=t303-probe-%25&page[limit]=100", "?filter%5Busername%5D%5Blike%5D=t303-probe-%25"} {
+		if rec := do(h, "GET", "/api/v2/x"+q, map[string]string{"Authorization": "Bearer " + token("s")}); rec.Code != 200 {
+			t.Fatalf("%s: %d %s", q, rec.Code, rec.Body)
+		}
+	}
+}
+
 // ServeMux answers a non-canonical path with its own text/html redirect;
 // the gateway forwards the client's path verbatim (K7), so that answer would
 // reach the client. Every answer of the process is problem+json.

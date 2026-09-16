@@ -1,6 +1,7 @@
 package pgtx
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -34,10 +35,31 @@ func TestClassify_ProblemPassesThrough(t *testing.T) {
 }
 
 func TestClassify_OtherIsInternal(t *testing.T) {
-	for _, err := range []error{errors.New("boom"), &pgconn.PgError{Code: "42P01", Message: "relation does not exist"}, &pgconn.PgError{Code: "23505", Message: "duplicate key"}} {
+	for _, err := range []error{errors.New("boom"), &pgconn.PgError{Code: "42P01", Message: "relation does not exist"}} {
 		if _, _, kind := classify(err); kind != kindInternal {
 			t.Errorf("%v → %v", err, kind)
 		}
+	}
+}
+
+// A constraint the database refuses is the client's data, not a failure of
+// the process: not-null/check/foreign-key are 400 with the constraint's own
+// text (as v1 sends it), a duplicate key is 409. The row itself (pg Detail)
+// stays out of the answer.
+func TestClassify_ConstraintViolationIsTheClients(t *testing.T) {
+	notNull := &pgconn.PgError{Code: "23502", Message: `null value in column "name" of relation "user" violates not-null constraint`, Detail: "Failing row contains (1, secret)."}
+	code, detail, kind := classify(notNull)
+	if kind != kindConstraint || code != "23502" || detail != notNull.Message {
+		t.Fatalf("%q %q %v", code, detail, kind)
+	}
+	r := &Runner{}
+	var p *problem.Problem
+	if err := r.explain(context.Background(), notNull); !errors.As(err, &p) || p.Status != 400 || p.Type != "urn:apostol:error:validation" || p.Detail != notNull.Message {
+		t.Fatalf("%v", err)
+	}
+	dup := &pgconn.PgError{Code: "23505", Message: `duplicate key value violates unique constraint "user_username_key"`, Detail: "Key (username)=(x) already exists."}
+	if err := r.explain(context.Background(), dup); !errors.As(err, &p) || p.Status != 409 || p.Type != "urn:apostol:error:conflict" || strings.Contains(p.Detail, "already exists") {
+		t.Fatalf("%v", err)
 	}
 }
 

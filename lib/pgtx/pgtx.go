@@ -177,10 +177,11 @@ func (r *Runner) Do(ctx context.Context, s Session, req *Request, fn func(ctx co
 type kind int
 
 const (
-	kindProblem   kind = iota // already a *problem.Problem
-	kindCatalogue             // RAISE 'ERR-GGG-CCC: text'
-	kindRaise                 // RAISE without a catalogue code
-	kindInternal              // anything else
+	kindProblem    kind = iota // already a *problem.Problem
+	kindCatalogue              // RAISE 'ERR-GGG-CCC: text'
+	kindRaise                  // RAISE without a catalogue code
+	kindConstraint             // SQLSTATE class 23: a constraint refused the client's data
+	kindInternal               // anything else
 )
 
 // classify sorts an error from inside the transaction.
@@ -195,6 +196,9 @@ func classify(err error) (code, detail string, k kind) {
 			return code, text, kindCatalogue
 		}
 		return "", pg.Message, kindRaise
+	}
+	if pg != nil && strings.HasPrefix(pg.Code, "23") {
+		return pg.Code, pg.Message, kindConstraint
 	}
 	return "", "", kindInternal
 }
@@ -231,6 +235,18 @@ func (r *Runner) explain(ctx context.Context, err error) error {
 		return problem.FromCode(code, title, detail)
 	case kindRaise:
 		return problem.New(400, "raise", "Request refused", detail)
+	case kindConstraint:
+		// the constraint's own text, as v1 sends it; pg Detail carries the
+		// failing row or the duplicate key and stays out of the answer.
+		// Logged: a platform defect surfacing as a constraint would otherwise
+		// be indistinguishable from bad input
+		if r.Logger != nil {
+			r.Logger.Warn("constraint refused", "sqlstate", code, "err", detail)
+		}
+		if code == "23505" { // unique_violation
+			return problem.New(409, "conflict", "Conflict", detail)
+		}
+		return problem.New(400, "validation", "Bad request", detail)
 	}
 	return r.internal("request", err)
 }

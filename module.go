@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"path"
 	"strings"
 	"time"
@@ -153,6 +154,13 @@ func (h *host) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		problem.New(404, "not-found", "Not found", "").Write(w, r)
+		return
+	}
+	// r.URL.Query() drops a pair it cannot unescape and says nothing — a
+	// filter that disappears turns a selection into "everything"; decided
+	// here once, so no route ever sees a query the client did not send
+	if _, err := url.ParseQuery(r.URL.RawQuery); err != nil {
+		problem.New(400, "validation", "Bad request", "query: "+err.Error()).Write(w, r)
 		return
 	}
 	h.mux.ServeHTTP(w, r)
