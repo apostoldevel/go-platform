@@ -56,23 +56,12 @@ func TestIntegration_EventLogReadParity(t *testing.T) {
 	}
 }
 
-// api.write_to_log of db-platform 1.2.20 calls AddEventLog with an ambiguous
-// argument list (SQLSTATE 42725) — v1 /admin/event/log/set fails the same
-// way; the v2 route is right, the function is not.
+// A journal write through api.write_to_log (fixed in db-platform 1.2.21:
+// before, the function's own call was ambiguous) — the row is read back by
+// its Location.
 func TestIntegration_EventLogWrite(t *testing.T) {
 	l := live(t)
-	probe := l.Runner.Do(context.Background(), l.Session, &pgtx.Request{Method: "TEST", Path: "/probe"}, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, "SELECT api.write_to_log('M', 1000, 'go-test', 'probe')")
-		return err
-	})
 	rec := l.Call("POST", "/api/v2/event-log", `{"type":"M","code":1000,"scope":"go-test","text":"written by the v2 integration test"}`)
-	if probe != nil {
-		if rec.Code != 500 {
-			t.Fatalf("write with a broken api.write_to_log: %d %s", rec.Code, rec.Body)
-		}
-		t.Logf("api.write_to_log is broken in this db-platform (%v) — POST /api/v2/event-log answers 500 until the database fixes it", probe)
-		return
-	}
 	if rec.Code != 201 || rec.Header().Get("Location") == "" {
 		t.Fatalf("write: %d %s", rec.Code, rec.Body)
 	}

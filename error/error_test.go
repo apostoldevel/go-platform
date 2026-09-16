@@ -56,19 +56,6 @@ func TestCreate_RequiresCodeAndHTTPCode_BeforeTheDatabase(t *testing.T) {
 	}
 }
 
-func TestDefaults_SeverityAndCategoryAsAddError(t *testing.T) {
-	b := &body{}
-	errors.Defaults(b)
-	if b.Severity == nil || *b.Severity != "E" || b.Category == nil || *b.Category != "validation" {
-		t.Fatalf("%+v", b)
-	}
-	given := &body{Severity: ptr("W"), Category: ptr("access")}
-	errors.Defaults(given)
-	if *given.Severity != "W" || *given.Category != "access" {
-		t.Fatalf("%+v", given)
-	}
-}
-
 func TestByCode_RefusesAnythingButACatalogueCode(t *testing.T) {
 	mux := http.NewServeMux()
 	New(Config{Doer: noDB{t}}).Routes(mux)

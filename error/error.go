@@ -38,21 +38,8 @@ type module struct {
 var errors = rest.Writable{
 	Resource: rest.Resource{Prefix: "/api/v2/errors", GetFn: "api.get_error", ListFn: "api.list_error", CountFn: "api.count_error"},
 	SetSQL:   "SELECT row_to_json(t) FROM api.set_error($1::uuid, $2, $3::integer, $4::char, $5, $6, $7, $8) t",
-	NewBody:  func() rest.Body { return &body{} },
-	// api.set_error(NULL, …) hands an explicit NULL to api.add_error, past its
-	// DEFAULT 'E' / 'validation', into NOT NULL columns — the defaults are put here
-	Defaults: func(b rest.Body) {
-		e := b.(*body)
-		if e.Severity == nil {
-			e.Severity = ptr("E")
-		}
-		if e.Category == nil {
-			e.Category = ptr("validation")
-		}
-	},
+	NewBody:  func() rest.Body { return &body{} }, // absent severity/category default in api.add_error (db-platform ≥ 1.2.21)
 }
-
-func ptr(s string) *string { return &s }
 
 // codeRe is the shape of a catalogue code: ERR-<http group>-<number>.
 var codeRe = regexp.MustCompile(`^ERR-[0-9]{3}-[0-9]{3}$`)

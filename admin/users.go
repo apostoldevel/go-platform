@@ -21,19 +21,7 @@ var users = rest.Writable{
 	SetSQL:   "SELECT row_to_json(t) FROM api.set_user($1::uuid, $2, $3, $4, $5, $6, $7, $8::boolean, $9::boolean) t",
 	NewBody:  func() rest.Body { return &userBody{} },
 	DeleteFn: "api.delete_user",
-	Redact:   redact,
-	// api.add_user passes the flags through to NOT NULL columns; v1's clients
-	// send both as false explicitly — here absent means false
-	Defaults: func(b rest.Body) {
-		u := b.(*userBody)
-		f := false
-		if u.PasswordChange == nil {
-			u.PasswordChange = &f
-		}
-		if u.PasswordNotChange == nil {
-			u.PasswordNotChange = &f
-		}
-	},
+	Redact:   redact, // absent flags default in api.add_user (db-platform ≥ 1.2.21)
 }
 
 func (m *module) userRoutes(mux *http.ServeMux) {
