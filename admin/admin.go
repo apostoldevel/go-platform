@@ -40,7 +40,7 @@ func New(cfg Config) platform.Module {
 
 func (m *module) Name() string { return "admin" }
 func (m *module) Prefixes() []string {
-	return []string{users.Prefix, groups.res.Prefix, areas.res.Prefix, areaTypes.Prefix, interfaces.res.Prefix, sessions.Prefix}
+	return []string{users.Prefix, groups.Prefix, areas.Prefix, areaTypes.Prefix, interfaces.Prefix, sessions.Prefix}
 }
 
 // Routes registers the module's resources on the shared mux.

@@ -261,11 +261,18 @@ func TestReload_CallsHookAndReregistersWhenPrefixesChange(t *testing.T) {
 	if res.Type != 3 || reloads.Load() != 1 {
 		t.Fatalf("%+v reloads=%d", res, reloads.Load())
 	}
-	if stub.WaitRegistrations(t, 2, 3*time.Second) < 2 {
-		t.Fatal("no re-registration after prefixes change")
-	}
-	if got := stub.LastRegistration().Prefixes; len(got) != 2 {
-		t.Fatalf("prefixes %v", got)
+	// a reconnect after a lost socket also registers (with the old prefixes),
+	// so the count alone proves nothing: wait for the registration that
+	// carries the new prefixes
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if got := stub.LastRegistration().Prefixes; len(got) == 2 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no re-registration with the new prefixes: %v", stub.LastRegistration().Prefixes)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 

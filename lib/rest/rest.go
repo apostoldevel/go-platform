@@ -182,6 +182,24 @@ func Rows(ctx context.Context, tx pgx.Tx, sql string, args ...any) ([]json.RawMe
 	return out, rows.Err()
 }
 
+// RowsHandler answers a whole row_to_json query as a JSON array — the v1
+// branches that read a view or a set-returning function with no paging.
+func RowsHandler(d Doer, log *slog.Logger, sql string, args ...any) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var rows []json.RawMessage
+		err := d.Do(r.Context(), platform.SessionOf(r), ReqOf(r, 200, nil), func(ctx context.Context, tx pgx.Tx) (err error) {
+			rows, err = Rows(ctx, tx, sql, args...)
+			return err
+		})
+		if err != nil {
+			Fail(w, r, log, err)
+			return
+		}
+		body, _ := json.Marshal(rows)
+		WriteJSON(w, 200, body)
+	}
+}
+
 // GetRow is one row of Get by id; no row is 404 — RLS does not distinguish
 // "no such object" from "no rights", neither does the answer.
 func (res Resource) GetRow(ctx context.Context, tx pgx.Tx, id any) (json.RawMessage, error) {

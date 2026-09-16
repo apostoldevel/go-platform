@@ -16,15 +16,29 @@ import (
 // /admin/user/* (api.get_user, api.list_user, api.count_user, api.set_user,
 // api.delete_user, api.set_user_profile, api.user_lock/unlock,
 // api.change_password, api.get/set_user_iptable, api.member_*, api.user_member).
-var users = rest.Resource{Prefix: "/api/v2/users", GetFn: "api.get_user", ListFn: "api.list_user", CountFn: "api.count_user"}
+var users = rest.Writable{
+	Resource: rest.Resource{Prefix: "/api/v2/users", GetFn: "api.get_user", ListFn: "api.list_user", CountFn: "api.count_user"},
+	SetSQL:   "SELECT row_to_json(t) FROM api.set_user($1::uuid, $2, $3, $4, $5, $6, $7, $8::boolean, $9::boolean) t",
+	NewBody:  func() rest.Body { return &userBody{} },
+	DeleteFn: "api.delete_user",
+	Redact:   redact,
+	// api.add_user passes the flags through to NOT NULL columns; v1's clients
+	// send both as false explicitly — here absent means false
+	Defaults: func(b rest.Body) {
+		u := b.(*userBody)
+		f := false
+		if u.PasswordChange == nil {
+			u.PasswordChange = &f
+		}
+		if u.PasswordNotChange == nil {
+			u.PasswordNotChange = &f
+		}
+	},
+}
 
 func (m *module) userRoutes(mux *http.ServeMux) {
 	p := users.Prefix
-	mux.HandleFunc("GET "+p, users.List(m.cfg.Doer, m.log))
-	mux.HandleFunc("GET "+p+"/{id}", users.Get(m.cfg.Doer, m.log))
-	mux.HandleFunc("POST "+p, m.userCreate)
-	mux.HandleFunc("PATCH "+p+"/{id}", m.userUpdate)
-	mux.HandleFunc("DELETE "+p+"/{id}", m.userDelete)
+	users.Routes(mux, m.cfg.Doer, m.idem, m.log)
 	mux.HandleFunc("PATCH "+p+"/{id}/profile", m.userProfile)
 	mux.HandleFunc("POST "+p+"/{id}/actions/{action}", m.userAction)
 	mux.HandleFunc("GET "+p+"/{id}/iptable", m.userIptableGet)
@@ -49,61 +63,9 @@ type userBody struct {
 	PasswordNotChange *bool   `json:"passwordnotchange"`
 }
 
-const setUser = "SELECT row_to_json(t) FROM api.set_user($1::uuid, $2, $3, $4, $5, $6, $7, $8::boolean, $9::boolean) t"
-
-func (b userBody) args(id any) []any {
+func (b *userBody) Validate(create bool) error { return rest.Required("username", b.Username, create) }
+func (b *userBody) Args(id any) []any {
 	return []any{id, b.Username, b.Password, b.Name, b.Phone, b.Email, b.Description, b.PasswordChange, b.PasswordNotChange}
-}
-
-func (m *module) userCreate(w http.ResponseWriter, r *http.Request) {
-	var b userBody
-	raw, err := rest.ReadBody(r, &b)
-	if err != nil {
-		rest.Fail(w, r, m.log, err)
-		return
-	}
-	if b.Username == nil || *b.Username == "" {
-		rest.Fail(w, r, m.log, problem.New(400, "validation", "Bad request", "username is required"))
-		return
-	}
-	// api.add_user passes the flags through to NOT NULL columns; v1's clients
-	// send both as false explicitly — here absent means false
-	f := false
-	if b.PasswordChange == nil {
-		b.PasswordChange = &f
-	}
-	if b.PasswordNotChange == nil {
-		b.PasswordNotChange = &f
-	}
-	key := r.Header.Get("Idempotency-Key")
-	if key != "" {
-		if rec, conflict := m.idem.Lookup(rest.IdemScope(r, platform.SessionOf(r).Code), key, raw); conflict {
-			rest.Fail(w, r, m.log, problem.New(409, "conflict", "Conflict", "Idempotency-Key reused with a different body"))
-			return
-		} else if rec != nil {
-			rec.Replay(w)
-			return
-		}
-	}
-	cw := &rest.Capture{ResponseWriter: w}
-	var row json.RawMessage
-	err = m.cfg.Doer.Do(r.Context(), platform.SessionOf(r), rest.ReqOf(r, 201, redact(raw)), func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, setUser, b.args(nil)...).Scan(&row)
-	})
-	if err != nil {
-		rest.Fail(cw, r, m.log, err)
-	} else {
-		var created struct {
-			ID string `json:"id"`
-		}
-		_ = json.Unmarshal(row, &created)
-		cw.Header().Set("Location", users.Prefix+"/"+created.ID)
-		rest.SetETag(cw, row)
-		rest.WriteJSON(cw, 201, row)
-	}
-	if key != "" && cw.Status < 500 { // a 5xx is transient: the retry must reach the database
-		m.idem.Store(rest.IdemScope(r, platform.SessionOf(r).Code), key, raw, cw)
-	}
 }
 
 // redact keeps passwords out of api.log_request, as AddApiLog does for v1.
@@ -162,24 +124,6 @@ func (m *module) patch(w http.ResponseWriter, r *http.Request, id string, raw []
 	rest.WriteJSON(w, 200, row)
 }
 
-func (m *module) userUpdate(w http.ResponseWriter, r *http.Request) {
-	id, err := patchHead(r)
-	if err != nil {
-		rest.Fail(w, r, m.log, err)
-		return
-	}
-	var b userBody
-	raw, err := rest.ReadBody(r, &b)
-	if err != nil {
-		rest.Fail(w, r, m.log, err)
-		return
-	}
-	m.patch(w, r, id, raw, func(ctx context.Context, tx pgx.Tx, id string) error {
-		_, err := tx.Exec(ctx, setUser, b.args(id)...)
-		return err
-	})
-}
-
 // profileBody is the parameters of api.set_user_profile.
 type profileBody struct {
 	FamilyName     *string `json:"family_name"`
@@ -207,25 +151,6 @@ func (m *module) userProfile(w http.ResponseWriter, r *http.Request) {
 		_, err := tx.Exec(ctx, "SELECT api.set_user_profile($1::uuid, $2, $3, $4, $5, $6, $7, $8)", id, b.FamilyName, b.GivenName, b.PatronymicName, b.Locale, b.Area, b.Interface, b.Picture)
 		return err
 	})
-}
-
-func (m *module) userDelete(w http.ResponseWriter, r *http.Request) {
-	id, err := rest.IDOf(r)
-	if err != nil {
-		rest.Fail(w, r, m.log, err)
-		return
-	}
-	if err := m.cfg.Doer.Do(r.Context(), platform.SessionOf(r), rest.ReqOf(r, 204, nil), func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := users.GetRow(ctx, tx, id); err != nil {
-			return err
-		}
-		_, err := tx.Exec(ctx, "SELECT api.delete_user($1::uuid)", id)
-		return err
-	}); err != nil {
-		rest.Fail(w, r, m.log, err)
-		return
-	}
-	w.WriteHeader(204)
 }
 
 // userAction is POST /users/{id}/actions/{action}: lock, unlock — the row
