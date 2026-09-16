@@ -32,7 +32,7 @@ type Options struct {
 	SuspectAfter      int    // default 2
 	OfflineAfter      int    // default 4
 	RegisterTimeout   time.Duration
-	// RejectAfterUpgrade mirrors today's GatewayAPI (K2 amendment, T266): a
+	// RejectAfterUpgrade mirrors a gateway that cannot refuse before 101 (K2 amendment): a
 	// bad token is not refused with HTTP 401 but with close 1008
 	// "unauthorized" right after 101, before any CALLRESULT.
 	RejectAfterUpgrade bool

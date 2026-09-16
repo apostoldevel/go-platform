@@ -1,4 +1,4 @@
-// Package query translates /api/v2 list parameters (track-a-graftio.md §5)
+// Package query translates /api/v2 list parameters of /api/v2
 //
 //	?filter[state]=enabled&filter[created][gte]=…&filter[state][in]=a,b
 //	&sort=-created,name&fields=id,name&page[limit]=50&page[offset]=100

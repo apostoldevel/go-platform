@@ -15,7 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// Environment (see the card T267): GO_TEST_PG_DSN — the module's connection as
+// Environment: GO_TEST_PG_DSN — the module's connection as
 // apibot; GO_TEST_ADMIN_DSN — used ONLY to mint a live session with
 // api.login(admin, <password of the DSN>), the way AuthServer would. Both are
 // read from the environment, never from code.
@@ -175,7 +175,7 @@ func TestIntegration_LogRequestWhenPatched(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !r.Features.LogRequest {
-		t.Skip("api.log_request not in this database (T268 not applied)")
+		t.Skip("api.log_request not in this database (gateway patch not applied)")
 	}
 	req := &pgtx.Request{Method: "GET", Path: "/api/v2/clients", RequestID: "6f1c0b4a-1c9e-4c6e-9b0e-2b0a1b7e4d11"}
 	if err := r.Do(context.Background(), pgtx.Session{Code: mint(t)}, req, func(ctx context.Context, tx pgx.Tx) error { return nil }); err != nil {
@@ -190,7 +190,7 @@ func TestIntegration_AuthorizeLocalIsolatesWhenPatched(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !r.Features.AuthorizeLocal {
-		t.Skip("api.authorize_local not in this database (T268 not applied)")
+		t.Skip("api.authorize_local not in this database (gateway patch not applied)")
 	}
 	code := mint(t)
 	var seen *string

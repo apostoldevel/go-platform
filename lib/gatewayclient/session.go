@@ -343,7 +343,7 @@ func (s *session) endError(err error) error {
 	case websocket.StatusGoingAway: // 1001 — replaced
 		return ErrReplaced
 	case websocket.StatusPolicyViolation: // 1008 — refusal without CALLERROR
-		// K2 amendment (T266): until libapostol can refuse before 101, the
+		// K2 amendment: until the gateway can refuse before 101, the
 		// gateway closes 1008 right after the upgrade with the reason.
 		switch r := reason(closeErr); r {
 		case "unauthorized", "forbidden", "not-found", "bad-request":

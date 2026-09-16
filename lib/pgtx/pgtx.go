@@ -1,10 +1,10 @@
 // Package pgtx runs one HTTP request as one database transaction
-// (track-a-graftio.md §3–§4, contract K7):
+// (contract K7):
 //
 //	BEGIN
 //	  SELECT * FROM api.authorize($sub, $agent, $host)
 //	  … the handler's api.* calls …
-//	  SELECT api.log_request(…)            -- when the database has it (T268)
+//	  SELECT api.log_request(…)            -- when the database has it (gateway patch)
 //	COMMIT | ROLLBACK → the error is explained by the catalogue in a
 //	                    separate transaction → problem+json
 //
@@ -37,7 +37,7 @@ type Session struct {
 	Host  string
 }
 
-// Features are the api.* functions of the gateway patch (T268) the database
+// Features are the api.* functions of the gateway patch the database
 // has; Detect fills them, so one binary runs before and after the patch.
 type Features struct {
 	AuthorizeLocal bool // api.authorize_local — session context set transaction-locally
