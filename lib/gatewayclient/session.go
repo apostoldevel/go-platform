@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/apostoldevel/go-platform/gateway/frame"
+	"github.com/apostoldevel/go-platform/lib/gateway/frame"
 	"github.com/coder/websocket"
 )
 

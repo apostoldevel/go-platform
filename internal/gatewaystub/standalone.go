@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/apostoldevel/go-platform/auth/jwt"
+	"github.com/apostoldevel/go-platform/lib/auth/jwt"
 )
 
 // logTB adapts testing.TB for standalone use: failures go to the log.

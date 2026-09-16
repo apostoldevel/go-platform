@@ -19,8 +19,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/apostoldevel/go-platform/auth/jwt"
-	"github.com/apostoldevel/go-platform/gateway/frame"
+	"github.com/apostoldevel/go-platform/lib/auth/jwt"
+	"github.com/apostoldevel/go-platform/lib/gateway/frame"
 	"github.com/coder/websocket"
 )
 

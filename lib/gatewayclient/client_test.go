@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/apostoldevel/go-platform/gatewayclient"
 	"github.com/apostoldevel/go-platform/internal/gatewaystub"
+	"github.com/apostoldevel/go-platform/lib/gatewayclient"
 )
 
 const testSecret = "test-secret"
