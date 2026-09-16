@@ -8,7 +8,7 @@ import (
 
 func TestModule_PrefixesCoverTheAdminModule(t *testing.T) {
 	m := New(Config{Doer: noDB{t}})
-	if got := strings.Join(m.Prefixes(), " "); got != "/api/v2/users /api/v2/groups /api/v2/areas /api/v2/area-types /api/v2/interfaces /api/v2/sessions" {
+	if got := strings.Join(m.Prefixes(), " "); got != "/api/v2/users /api/v2/groups /api/v2/areas /api/v2/area-types /api/v2/interfaces /api/v2/sessions /api/v2/locales" {
 		t.Fatal(got)
 	}
 }
@@ -22,7 +22,7 @@ func TestCollections_RoutesAreThere(t *testing.T) {
 			"GET /api/v2/"+c, "POST /api/v2/"+c, "GET /api/v2/"+c+"/{id}", "PATCH /api/v2/"+c+"/{id}", "DELETE /api/v2/"+c+"/{id}",
 			"GET /api/v2/"+c+"/{id}/members", "POST /api/v2/"+c+"/{id}/members", "DELETE /api/v2/"+c+"/{id}/members/{uid}")
 	}
-	want = append(want, "POST /api/v2/areas/{id}/actions/{action}", "POST /api/v2/areas/actions/clear", "GET /api/v2/area-types", "GET /api/v2/sessions")
+	want = append(want, "POST /api/v2/areas/{id}/actions/{action}", "POST /api/v2/areas/actions/clear", "GET /api/v2/area-types", "GET /api/v2/sessions", "GET /api/v2/locales")
 	rep := strings.NewReplacer("{id}", "7f3a0000-0000-4000-8000-000000000001", "{uid}", "7f3a0000-0000-4000-8000-000000000002", "{action}", "delete-safely")
 	for _, w := range want {
 		method, pattern, _ := strings.Cut(w, " ")

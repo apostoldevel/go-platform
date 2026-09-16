@@ -100,3 +100,16 @@ func TestRequiredAll_NamesTheFirstMissing(t *testing.T) {
 		t.Fatalf("absent on PATCH is fine: %v", err)
 	}
 }
+
+// A resource without api.delete_<x> (the error catalogue) has four verbs:
+// DELETE must not be routed, so the host answers 405 with Allow, not 500.
+func TestWritable_NoDeleteFnNoDeleteRoute(t *testing.T) {
+	four := xs
+	four.DeleteFn = ""
+	mux := http.NewServeMux()
+	four.Routes(mux, noDB{t}, rest.NewIdempotency(0), nil)
+	r, _ := http.NewRequest("DELETE", "http://x/api/v2/xs/7f3a0000-0000-4000-8000-000000000001", nil)
+	if _, got := mux.Handler(r); got == "DELETE /api/v2/xs/{id}" {
+		t.Fatalf("DELETE routed without a delete function")
+	}
+}

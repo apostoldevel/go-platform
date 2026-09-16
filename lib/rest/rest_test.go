@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/apostoldevel/go-platform/lib/pgtx"
+	"github.com/apostoldevel/go-platform/lib/problem"
 	"github.com/apostoldevel/go-platform/lib/rest"
 	"github.com/jackc/pgx/v5"
 )
@@ -163,5 +164,52 @@ func TestIdempotency_KeyIsPerResource(t *testing.T) {
 	}
 	if _, conflict := idem.Lookup(users, "k", []byte(`{"a":2}`)); !conflict {
 		t.Fatal("different body under the same key must conflict")
+	}
+}
+
+// Once wraps a POST: no key — run; key with the same body — replay without
+// running; key with another body — 409 without running; a 5xx is not stored.
+func TestOnce_ReplaysConflictsAndForgets5xx(t *testing.T) {
+	idem := rest.NewIdempotency(time.Hour)
+	runs := 0
+	call := func(body, key string, status int) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", "/api/v2/xs", strings.NewReader(body))
+		if key != "" {
+			req.Header.Set("Idempotency-Key", key)
+		}
+		rec := httptest.NewRecorder()
+		rest.Once(rec, req, idem, "u1", []byte(body), nil, func(w http.ResponseWriter) {
+			runs++
+			w.WriteHeader(status)
+		})
+		return rec
+	}
+	call(`{"a":1}`, "", 201)
+	call(`{"a":1}`, "", 201)
+	if runs != 2 {
+		t.Fatalf("without a key every call runs: %d", runs)
+	}
+	call(`{"a":1}`, "k", 201)
+	if rec := call(`{"a":1}`, "k", 201); runs != 3 || rec.Header().Get("Idempotency-Replayed") != "true" || rec.Code != 201 {
+		t.Fatalf("replay: runs=%d %d %v", runs, rec.Code, rec.Header())
+	}
+	if rec := call(`{"a":2}`, "k", 201); runs != 3 || rec.Code != 409 {
+		t.Fatalf("conflict: runs=%d %d", runs, rec.Code)
+	}
+	call(`{"b":1}`, "k5", 500)
+	if rec := call(`{"b":1}`, "k5", 201); runs != 5 || rec.Header().Get("Idempotency-Replayed") != "" {
+		t.Fatalf("a 5xx must not be replayed: runs=%d %v", runs, rec.Header())
+	}
+}
+
+// RowsOf decides its arguments from the request before the database.
+func TestRowsOf_ArgsErrorIsAnsweredWithoutDB(t *testing.T) {
+	h := rest.RowsOf(noDB{t}, nil, "SELECT 1", func(*http.Request) ([]any, error) {
+		return nil, problem.New(400, "validation", "Bad request", "no")
+	})
+	rec := httptest.NewRecorder()
+	h(rec, httptest.NewRequest("GET", "/x", nil))
+	if rec.Code != 400 {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
 	}
 }

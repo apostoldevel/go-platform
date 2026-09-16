@@ -86,35 +86,22 @@ func (m *module) write(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// a journal write is not idempotent by itself — a retried POST is a second row without the key
-	key := r.Header.Get("Idempotency-Key")
-	scope := rest.IdemScope(r, platform.SessionOf(r).Code)
-	if key != "" {
-		if rec, conflict := m.idem.Lookup(scope, key, raw); conflict {
-			rest.Fail(w, r, m.log, problem.New(409, "conflict", "Conflict", "Idempotency-Key reused with a different body"))
-			return
-		} else if rec != nil {
-			rec.Replay(w)
+	rest.Once(w, r, m.idem, platform.SessionOf(r).Code, raw, m.log, func(w http.ResponseWriter) {
+		var row json.RawMessage
+		err := m.cfg.Doer.Do(r.Context(), platform.SessionOf(r), rest.ReqOf(r, 201, raw), func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, "SELECT row_to_json(t) FROM api.write_to_log($1, $2::integer, $3, $4) t", e.Type, e.Code, e.Scope, e.Text).Scan(&row)
+		})
+		if err != nil {
+			rest.Fail(w, r, m.log, err)
 			return
 		}
-	}
-	cw := &rest.Capture{ResponseWriter: w}
-	var row json.RawMessage
-	err = m.cfg.Doer.Do(r.Context(), platform.SessionOf(r), rest.ReqOf(r, 201, raw), func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, "SELECT row_to_json(t) FROM api.write_to_log($1, $2::integer, $3, $4) t", e.Type, e.Code, e.Scope, e.Text).Scan(&row)
-	})
-	if err != nil {
-		rest.Fail(cw, r, m.log, err)
-	} else {
 		var written struct {
 			ID int64 `json:"id"`
 		}
 		_ = json.Unmarshal(row, &written)
 		if written.ID > 0 {
-			cw.Header().Set("Location", eventLog.Prefix+"/"+strconv.FormatInt(written.ID, 10))
+			w.Header().Set("Location", eventLog.Prefix+"/"+strconv.FormatInt(written.ID, 10))
 		}
-		rest.WriteJSON(cw, 201, row)
-	}
-	if key != "" && cw.Status < 500 {
-		m.idem.Store(scope, key, raw, cw)
-	}
+		rest.WriteJSON(w, 201, row)
+	})
 }

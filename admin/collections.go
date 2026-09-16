@@ -65,7 +65,9 @@ var interfaces = collection{
 // code is a credential and is never addressed in a path.
 var (
 	areaTypes = rest.Resource{Prefix: "/api/v2/area-types"}
-	sessions  = rest.Resource{Prefix: "/api/v2/sessions", ListFn: "api.list_session", CountFn: "api.count_session"}
+	// locales is the view api.locale (v1 /locale of rest.api): the languages of the texts
+	locales  = rest.Resource{Prefix: "/api/v2/locales"}
+	sessions = rest.Resource{Prefix: "/api/v2/sessions", ListFn: "api.list_session", CountFn: "api.count_session"}
 )
 
 type groupBody struct {
@@ -114,6 +116,7 @@ func (m *module) collectionRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST "+areas.Prefix+"/{id}/actions/{action}", m.areaAction)
 	mux.HandleFunc("POST "+areas.Prefix+"/actions/clear", m.areasClear)
 	mux.HandleFunc("GET "+areaTypes.Prefix, rest.RowsHandler(m.cfg.Doer, m.log, "SELECT row_to_json(t) FROM api.area_type t")) // a view, read as the pool's role
+	mux.HandleFunc("GET "+locales.Prefix, rest.RowsHandler(m.cfg.Doer, m.log, "SELECT row_to_json(t) FROM api.locale t ORDER BY t.code"))
 	mux.HandleFunc("GET "+sessions.Prefix, sessions.List(m.cfg.Doer, m.log))
 }
 

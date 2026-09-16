@@ -185,10 +185,21 @@ func Rows(ctx context.Context, tx pgx.Tx, sql string, args ...any) ([]json.RawMe
 // RowsHandler answers a whole row_to_json query as a JSON array — the v1
 // branches that read a view or a set-returning function with no paging.
 func RowsHandler(d Doer, log *slog.Logger, sql string, args ...any) http.HandlerFunc {
+	return RowsOf(d, log, sql, func(*http.Request) ([]any, error) { return args, nil })
+}
+
+// RowsOf is RowsHandler with the arguments decided from the request — its
+// error is answered as is, before the database.
+func RowsOf(d Doer, log *slog.Logger, sql string, args func(*http.Request) ([]any, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		a, err := args(r)
+		if err != nil {
+			Fail(w, r, log, err)
+			return
+		}
 		var rows []json.RawMessage
-		err := d.Do(r.Context(), platform.SessionOf(r), ReqOf(r, 200, nil), func(ctx context.Context, tx pgx.Tx) (err error) {
-			rows, err = Rows(ctx, tx, sql, args...)
+		err = d.Do(r.Context(), platform.SessionOf(r), ReqOf(r, 200, nil), func(ctx context.Context, tx pgx.Tx) (err error) {
+			rows, err = Rows(ctx, tx, sql, a...)
 			return err
 		})
 		if err != nil {
@@ -197,6 +208,42 @@ func RowsHandler(d Doer, log *slog.Logger, sql string, args ...any) http.Handler
 		}
 		body, _ := json.Marshal(rows)
 		WriteJSON(w, 200, body)
+	}
+}
+
+// RowHandler answers one row of an api.* query keyed by the request — a
+// lookup by something other than the id (a catalogue code, path elements):
+// args decides the arguments (its error is answered as is), no row is 404,
+// the row carries an ETag and honours If-None-Match as Get does.
+func RowHandler(d Doer, log *slog.Logger, sql string, args func(*http.Request) ([]any, error)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		a, err := args(r)
+		if err != nil {
+			Fail(w, r, log, err)
+			return
+		}
+		var row json.RawMessage
+		req := ReqOf(r, 200, nil)
+		if err := d.Do(r.Context(), platform.SessionOf(r), req, func(ctx context.Context, tx pgx.Tx) error {
+			if err := tx.QueryRow(ctx, sql, a...).Scan(&row); errors.Is(err, pgx.ErrNoRows) {
+				return problem.New(404, "not-found", "Not found", "")
+			} else if err != nil {
+				return err
+			}
+			if tag := ETagOf(row); tag != "" && r.Header.Get("If-None-Match") == tag {
+				req.Status = 304
+			}
+			return nil
+		}); err != nil {
+			Fail(w, r, log, err)
+			return
+		}
+		SetETag(w, row)
+		if req.Status == 304 {
+			w.WriteHeader(304)
+			return
+		}
+		WriteJSON(w, 200, row)
 	}
 }
 
@@ -371,6 +418,31 @@ func (i *Idempotency) Store(scope, key string, body []byte, c *Capture) {
 		}
 	}
 	i.m[scope+"\x00"+key] = &Stored{hash: hashOf(body), status: c.Status, header: c.Header().Clone(), body: c.body, at: time.Now()}
+}
+
+// Once runs a POST under its Idempotency-Key: with no key, or no store, it
+// simply runs; the same key with the same body replays the stored answer;
+// another body under the key is 409; a 5xx answer is not stored — the retry
+// must reach the database. user scopes the key with the path (IdemScope).
+func Once(w http.ResponseWriter, r *http.Request, idem *Idempotency, user string, raw []byte, log *slog.Logger, do func(http.ResponseWriter)) {
+	key := r.Header.Get("Idempotency-Key")
+	if key == "" || idem == nil {
+		do(w)
+		return
+	}
+	scope := IdemScope(r, user)
+	if rec, conflict := idem.Lookup(scope, key, raw); conflict {
+		Fail(w, r, log, problem.New(409, "conflict", "Conflict", "Idempotency-Key reused with a different body"))
+		return
+	} else if rec != nil {
+		rec.Replay(w)
+		return
+	}
+	cw := &Capture{ResponseWriter: w}
+	do(cw)
+	if cw.Status < 500 {
+		idem.Store(scope, key, raw, cw)
+	}
 }
 
 // Replay writes the stored answer with Idempotency-Replayed: true.

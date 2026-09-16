@@ -74,11 +74,26 @@ func New(cfg Config, modules ...Module) (http.Handler, error) {
 }
 
 // Prefixes is the union of the modules' prefixes in registration order — the
-// list the process sends to the gateway.
+// list the process sends to the gateway. A prefix nested under another one
+// of the same process is left out: the gateway routes by longest prefix and
+// refuses an overlap, and the parent already brings the request here.
 func Prefixes(modules ...Module) []string {
-	var out []string
+	var all []string
 	for _, m := range modules {
-		out = append(out, m.Prefixes()...)
+		all = append(all, m.Prefixes()...)
+	}
+	var out []string
+	for _, p := range all {
+		covered := false
+		for _, q := range all {
+			if q != p && strings.HasPrefix(p+"/", q+"/") {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			out = append(out, p)
+		}
 	}
 	return out
 }

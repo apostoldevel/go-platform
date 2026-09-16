@@ -213,3 +213,13 @@ type probe struct {
 func (p probe) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET "+p.pref[0], func(w http.ResponseWriter, r *http.Request) { p.on(); w.WriteHeader(200) })
 }
+
+// A prefix under another one of the same process is not registered on its
+// own: the gateway routes by longest prefix and refuses an overlap, and the
+// process answers both — /api/v2/me covers /api/v2/me/event-log.
+func TestPrefixes_ANestedPrefixIsCoveredByItsParent(t *testing.T) {
+	got := platform.Prefixes(fake{pref: []string{"/api/v2/me/event-log"}}, fake{pref: []string{"/api/v2/me", "/api/v2/men"}})
+	if strings.Join(got, " ") != "/api/v2/me /api/v2/men" {
+		t.Fatalf("%v", got)
+	}
+}

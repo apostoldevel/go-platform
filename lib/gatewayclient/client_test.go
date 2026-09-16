@@ -263,8 +263,9 @@ func TestReload_CallsHookAndReregistersWhenPrefixesChange(t *testing.T) {
 	}
 	// a reconnect after a lost socket also registers (with the old prefixes),
 	// so the count alone proves nothing: wait for the registration that
-	// carries the new prefixes
-	deadline := time.Now().Add(3 * time.Second)
+	// carries the new prefixes — through the reconnect backoff (1 s, 2 s, …)
+	// when the machine is busy with the other packages' tests
+	deadline := time.Now().Add(10 * time.Second)
 	for {
 		if got := stub.LastRegistration().Prefixes; len(got) == 2 {
 			return

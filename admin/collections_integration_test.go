@@ -92,6 +92,9 @@ func TestIntegration_AreasAndInterfaces(t *testing.T) {
 	} else {
 		t.Log("api.area_type is not granted to the pool's role — GET /api/v2/area-types answers 500 until db-platform grants SELECT on api.* views to the pool role (a database change)")
 	}
+	if rec := l.Call("GET", "/api/v2/locales", ""); rec.Code != 200 || !strings.Contains(rec.Body.String(), `"code":"en"`) || !resttest.SameJSON(rec.Body.Bytes(), l.Direct(t, "SELECT coalesce(json_agg(row_to_json(t) ORDER BY t.code), '[]') FROM api.locale t")) {
+		t.Fatalf("locales: %d %s", rec.Code, rec.Body)
+	}
 	rec := l.Call("GET", "/api/v2/areas?page[limit]=5", "")
 	var list struct {
 		Items []map[string]any `json:"items"`

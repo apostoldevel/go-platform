@@ -103,7 +103,12 @@ func (c *Client) runSession(ctx context.Context) (registered bool, err error) {
 
 	c.mu.Lock()
 	c.active = s
-	c.reg = reg
+	// only the address the session resolved goes back: a /reload that landed
+	// while this registration was in flight has already replaced the rest,
+	// and writing the snapshot back would re-register with stale prefixes
+	if c.reg.Address == "" {
+		c.reg.Address = reg.Address
+	}
 	overloaded := c.overloaded
 	c.mu.Unlock()
 	defer func() { c.mu.Lock(); c.active = nil; c.mu.Unlock() }()

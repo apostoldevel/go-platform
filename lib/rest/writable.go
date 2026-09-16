@@ -85,14 +85,17 @@ type Writable struct {
 	Defaults func(Body)
 }
 
-// Routes registers the five verbs of the resource on the mux.
+// Routes registers the verbs of the resource on the mux: five, or four when
+// the database has no api.delete_<x> (DeleteFn empty) — then DELETE is 405.
 func (wr Writable) Routes(mux *http.ServeMux, d Doer, idem *Idempotency, log *slog.Logger) {
 	p := wr.Prefix
 	mux.HandleFunc("GET "+p, wr.List(d, log))
 	mux.HandleFunc("GET "+p+"/{id}", wr.Get(d, log))
 	mux.HandleFunc("POST "+p, wr.Create(d, idem, log))
 	mux.HandleFunc("PATCH "+p+"/{id}", wr.Update(d, log))
-	mux.HandleFunc("DELETE "+p+"/{id}", wr.Delete(d, log))
+	if wr.DeleteFn != "" {
+		mux.HandleFunc("DELETE "+p+"/{id}", wr.Delete(d, log))
+	}
 }
 
 func (wr Writable) logged(raw []byte) []byte {
@@ -121,34 +124,21 @@ func (wr Writable) Create(d Doer, idem *Idempotency, log *slog.Logger) http.Hand
 		if wr.Defaults != nil {
 			wr.Defaults(b)
 		}
-		key := r.Header.Get("Idempotency-Key")
-		scope := IdemScope(r, platform.SessionOf(r).Code)
-		if key != "" && idem != nil {
-			if rec, conflict := idem.Lookup(scope, key, raw); conflict {
-				Fail(w, r, log, problem.New(409, "conflict", "Conflict", "Idempotency-Key reused with a different body"))
-				return
-			} else if rec != nil {
-				rec.Replay(w)
+		Once(w, r, idem, platform.SessionOf(r).Code, raw, log, func(w http.ResponseWriter) {
+			var row json.RawMessage
+			err := d.Do(r.Context(), platform.SessionOf(r), ReqOf(r, 201, wr.logged(raw)), func(ctx context.Context, tx pgx.Tx) error {
+				return tx.QueryRow(ctx, wr.SetSQL, b.Args(nil)...).Scan(&row)
+			})
+			if err != nil {
+				Fail(w, r, log, err)
 				return
 			}
-		}
-		cw := &Capture{ResponseWriter: w}
-		var row json.RawMessage
-		err = d.Do(r.Context(), platform.SessionOf(r), ReqOf(r, 201, wr.logged(raw)), func(ctx context.Context, tx pgx.Tx) error {
-			return tx.QueryRow(ctx, wr.SetSQL, b.Args(nil)...).Scan(&row)
-		})
-		if err != nil {
-			Fail(cw, r, log, err)
-		} else {
 			if loc := LocationOf(wr.Resource, row); loc != "" {
-				cw.Header().Set("Location", loc)
+				w.Header().Set("Location", loc)
 			}
-			SetETag(cw, row)
-			WriteJSON(cw, 201, row)
-		}
-		if key != "" && idem != nil && cw.Status < 500 { // a 5xx is transient: the retry must reach the database
-			idem.Store(scope, key, raw, cw)
-		}
+			SetETag(w, row)
+			WriteJSON(w, 201, row)
+		})
 	}
 }
 
