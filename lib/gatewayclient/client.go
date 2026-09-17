@@ -1,5 +1,5 @@
 // Package gatewayclient is the module's side of the gateway control plane
-// (docs/wiki/common/gateway-contract.md, K1–K6): connect, /register, heartbeat,
+// (module-GatewayAPI, README section "Control plane"): connect, /register, heartbeat,
 // /status, /unregister; answers /ping, /drain, /reload; reconnects with backoff
 // 1→30 s; drains on request (SIGTERM is the caller's signal to call Drain).
 package gatewayclient
@@ -41,12 +41,12 @@ const (
 )
 
 // ErrReplaced is returned by Run after close 1001: another instance with the
-// same name registered — the module must not reconnect (contract K2).
+// same name registered — the module must not reconnect.
 var ErrReplaced = errors.New("gatewayclient: replaced by a newer registration")
 
 var errDrained = errors.New("drained")
 
-// Registration are the parameters a /reload may change (contract K5).
+// Registration are the parameters a /reload may change.
 type Registration struct {
 	Address  string
 	Prefixes []string
@@ -54,7 +54,7 @@ type Registration struct {
 }
 
 // Config describes the module to the gateway. Everything but the hooks comes
-// from the environment (contract K9).
+// from the environment.
 type Config struct {
 	URL      string // ws://host:port/gateway
 	Module   string
@@ -83,7 +83,7 @@ type Config struct {
 	// a lost socket or a failed dial; default DefaultReconnect (1→30 s, ±20 %).
 	Reconnect func(attempt int) time.Duration
 	// ReconnectAfterRefusal is the wait after a registration refusal or a
-	// rejected handshake; default 30 s (contract K2).
+	// rejected handshake; default 30 s.
 	ReconnectAfterRefusal func() time.Duration
 	// DrainDeadline bounds the wait for in-flight requests; default 30 s.
 	DrainDeadline time.Duration
@@ -165,7 +165,7 @@ func New(cfg Config) (*Client, error) {
 	}, nil
 }
 
-// DefaultReconnect is the contract's schedule: 1, 2, 4, 8, 16, 30, 30… s, ±20 %.
+// DefaultReconnect is the protocol's schedule: 1, 2, 4, 8, 16, 30, 30… s, ±20 %.
 func DefaultReconnect(attempt int) time.Duration {
 	base := time.Duration(1<<min(attempt, 5)) * time.Second
 	if base > 30*time.Second {

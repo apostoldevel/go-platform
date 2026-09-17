@@ -1,4 +1,4 @@
-// Package problem is the module's error body (contract K7, RFC 9457):
+// Package problem is the module's error body (RFC 9457):
 //
 //	{"type":"urn:apostol:error:ERR-400-032","title":"…","status":400,"detail":"…",
 //	 "instance":"/api/v2/clients/7f…","request_id":"<X-Request-Id>","code":"ERR-400-032"}
@@ -66,7 +66,7 @@ func FromCode(code, title, detail string) *Problem {
 }
 
 // Write sends the problem as the response, filling instance and request_id
-// from the request (contract K7: X-Request-Id is returned unchanged).
+// from the request (X-Request-Id is returned unchanged).
 func (p *Problem) Write(w http.ResponseWriter, r *http.Request) {
 	out := *p
 	if out.Instance == "" && r != nil {

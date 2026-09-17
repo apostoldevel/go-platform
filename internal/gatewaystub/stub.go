@@ -1,7 +1,8 @@
 // Package gatewaystub is a test double of GatewayAPI's control plane, written
-// to the contract (docs/wiki/common/gateway-contract.md, K1–K6). It is the
-// "self-check without the other side" of the Go module: every refusal the
-// contract names can be produced on purpose, and everything the module sends
+// to the control-plane protocol of module-GatewayAPI (its README, section
+// "Control plane"). It is the "self-check without the other side" of the Go
+// module: every refusal the protocol names can be produced on purpose, and
+// everything the module sends
 // is recorded for assertions.
 package gatewaystub
 
@@ -24,7 +25,7 @@ import (
 	"github.com/coder/websocket"
 )
 
-// Options configures the stub; zero values take the contract's defaults.
+// Options configures the stub; zero values take the protocol's defaults.
 type Options struct {
 	Secret            string // HMAC secret of the gateway audience
 	Audience          string // client_id the token must carry in aud
@@ -32,7 +33,7 @@ type Options struct {
 	SuspectAfter      int    // default 2
 	OfflineAfter      int    // default 4
 	RegisterTimeout   time.Duration
-	// RejectAfterUpgrade mirrors a gateway that cannot refuse before 101 (K2 amendment): a
+	// RejectAfterUpgrade mirrors a gateway that cannot refuse before 101: a
 	// bad token is not refused with HTTP 401 but with close 1008
 	// "unauthorized" right after 101, before any CALLRESULT.
 	RejectAfterUpgrade bool

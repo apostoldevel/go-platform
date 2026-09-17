@@ -1,4 +1,4 @@
-// Package jwt verifies the platform's access tokens locally (contract K7):
+// Package jwt verifies the platform's access tokens locally:
 // HMAC signature with the secret of the audience named in `aud`, `exp`, and
 // an allowed `iss`. The platform signs with sign(payload, secret, alg) —
 // kernel/jwt.sql — HS256/HS384/HS512 only; anything else is malformed here.

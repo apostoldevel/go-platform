@@ -335,7 +335,7 @@ func TestGatewayGoneEntirely_KeepsRetrying(t *testing.T) {
 	rec.WaitN(t, gatewayclient.EventConnectFailed, 3, 2*time.Second)
 }
 
-// ── after the K2 amendment of the contract ────────────
+// ── handshake refused after the upgrade ────────────
 
 func TestOversizedFrameFromGateway_Closes1009AndReconnects(t *testing.T) {
 	stub := gatewaystub.New(t, gatewaystub.Options{Secret: testSecret, Audience: "gateway-test", HeartbeatInterval: 1})
@@ -402,8 +402,8 @@ func TestSilentGateway_ModuleClosesWith4001NotReplaced(t *testing.T) {
 }
 
 func TestClose1008AfterUpgrade_IsHandshakeRejection(t *testing.T) {
-	// K2 amendment: until the gateway can refuse before
-	// 101, the gateway upgrades and immediately closes 1008 with the reason.
+	// A gateway that cannot refuse before 101 upgrades and immediately
+	// closes 1008 with the reason.
 	stub := gatewaystub.New(t, gatewaystub.Options{Secret: testSecret, Audience: "gateway-test", HeartbeatInterval: 1, RejectAfterUpgrade: true})
 	var calls atomic.Int32
 	c, rec := module(t, stub, func(cfg *gatewayclient.Config) {

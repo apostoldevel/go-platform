@@ -1,4 +1,4 @@
-// Package rest is what every GoAPI package repeats over api.*: the /api/v2
+// Package rest is what every GoAPI package repeats over api.*: the
 // conventions of /api/v2 — a list with total and paging, a
 // single row with ETag and 304, problem+json for any error, JSON bodies
 // with unknown keys refused (as CheckJsonbKeys does), Idempotency-Key replay.
@@ -104,7 +104,7 @@ func WriteJSON(w http.ResponseWriter, status int, body []byte) {
 }
 
 // ETagOf derives the weak ETag of a row: from its last update where the view
-// exposes one (`lastupdate` of Object<X>, `udate` of the design), otherwise a
+// exposes one (`lastupdate` of Object<X>, or `udate`), otherwise a
 // digest of the row itself — api.user and the admin views carry no stamp,
 // and If-Match must still be able to say "unchanged since I read it".
 func ETagOf(row json.RawMessage) string {

@@ -1,6 +1,6 @@
 // Package admin is the GoAPI package of the SQL module admin
 // (db/sql/platform/admin): users, groups, areas, interfaces and their
-// memberships, sessions — over the module's api.* functions, in the /api/v2
+// memberships, sessions — over the module's api.* functions, in the
 // /api/v2 shape. The v1 routes /user/* and /admin/user/*
 // call the same functions; here they are one resource, and who may see or
 // change what is the database's decision, as it always was.

@@ -1,9 +1,9 @@
-// Package query translates /api/v2 list parameters of /api/v2
+// Package query translates the list parameters of /api/v2
 //
 //	?filter[state]=enabled&filter[created][gte]=…&filter[state][in]=a,b
 //	&sort=-created,name&fields=id,name&page[limit]=50&page[offset]=100
 //
-// into the search/orderby/fields jsonb of api.sql() (db-platform, wiki §13).
+// into the search/orderby/fields jsonb of api.sql() (db-platform).
 // The operator language stays in the database; this package only renames.
 package query
 

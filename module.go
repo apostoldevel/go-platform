@@ -28,7 +28,7 @@ import (
 // Prefixes go to the gateway's /register verbatim, Routes registers the
 // package's handlers on the shared mux ("GET /api/v2/clients/{id}").
 //
-// Install/Migrate and the package's SQL are stage 2 of the design and are
+// Install/Migrate and the package's own SQL are a later stage and are
 // deliberately not here yet.
 type Module interface {
 	Name() string
@@ -104,13 +104,13 @@ type ctxKey int
 const sessionKey ctxKey = 1
 
 // SessionOf returns the session the host established from the bearer token:
-// code = JWT sub, agent and host from the headers the gateway forwards (K7).
+// code = JWT sub, agent and host from the headers the gateway forwards.
 func SessionOf(r *http.Request) pgtx.Session {
 	s, _ := r.Context().Value(sessionKey).(pgtx.Session)
 	return s
 }
 
-// ServeHTTP: request id, in-flight accounting, JWT (contract K7), dispatch.
+// ServeHTTP: request id, in-flight accounting, JWT, dispatch.
 func (h *host) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.cfg.InFlight != nil {
 		h.cfg.InFlight.Add(1)

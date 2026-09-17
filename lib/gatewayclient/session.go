@@ -158,7 +158,7 @@ func (s *session) loop() error {
 	}
 }
 
-// drain runs the K4/K7 shutdown: /status draining → wait → /unregister → close 1000.
+// drain runs the shutdown: /status draining → wait → /unregister → close 1000.
 func (s *session) drain(req drainReq) error {
 	c := s.c
 	c.setState(Draining)
@@ -199,7 +199,7 @@ func (s *session) status(state, reason string) {
 var errTimeout = errors.New("no answer")
 
 // closeSilentGateway is the module-side close code for "the gateway stopped
-// answering" — 4001, so that 1001 keeps its contract meaning (replaced).
+// answering" — 4001, so that 1001 keeps its protocol meaning (replaced).
 const closeSilentGateway = websocket.StatusCode(4001)
 
 // call sends a CALL and waits for its CALLRESULT/CALLERROR.
@@ -250,7 +250,7 @@ func (s *session) reader() {
 			continue
 		}
 		f, err := frame.Parse(data)
-		if errors.Is(err, frame.ErrTooLarge) { // K1: > 64 KiB → close 1009
+		if errors.Is(err, frame.ErrTooLarge) { // > 64 KiB → close 1009
 			s.close(websocket.StatusMessageTooBig, "frame too large")
 			s.mu.Lock()
 			s.closeErr = errors.New("frame too large")
@@ -276,7 +276,7 @@ func (s *session) reader() {
 	}
 }
 
-// handle answers the gateway's commands (contract K5).
+// handle answers the gateway's commands.
 func (s *session) handle(f frame.Frame) {
 	c := s.c
 	switch f.Action {
@@ -348,8 +348,8 @@ func (s *session) endError(err error) error {
 	case websocket.StatusGoingAway: // 1001 — replaced
 		return ErrReplaced
 	case websocket.StatusPolicyViolation: // 1008 — refusal without CALLERROR
-		// K2 amendment: until the gateway can refuse before 101, the
-		// gateway closes 1008 right after the upgrade with the reason.
+		// A gateway that cannot refuse before 101 closes 1008 right after
+		// the upgrade with the reason.
 		switch r := reason(closeErr); r {
 		case "unauthorized", "forbidden", "not-found", "bad-request":
 			return &refusal{code: 1008, msg: r, handshake: true}

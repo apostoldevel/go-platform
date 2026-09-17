@@ -33,7 +33,7 @@ func TestModule_NameAndRoutes(t *testing.T) {
 			t.Fatalf("%s → %q", w, got)
 		}
 	}
-	// subscriptions are made over the WebSocket (decision 15): no write verb here
+	// subscriptions are made over the WebSocket (events over WS, requests over HTTP): no write verb here
 	for _, method := range []string{"POST", "PUT", "PATCH", "DELETE"} {
 		r, _ := http.NewRequest(method, "http://x/api/v2/observer/listeners/notify/main", nil)
 		if _, got := mux.Handler(r); strings.HasPrefix(got, method+" ") {

@@ -2,7 +2,8 @@
 // (db/sql/platform/api): of its v1 routes only the API journal is a
 // resource — /api/v2/api-log over api.log (v1 /admin/api/log/*); the
 // rest of rest.api (ping, time, authenticate, authorize, su, run) is not
-// carried to v2 by design (wiki/go/v1-to-v2.md), and /search, /locale,
+// carried to v2 by design (README, "What v1 has that v2 does not"), and
+// /search, /locale,
 // /entity … belong to the packages that own their api.* functions.
 package api
 

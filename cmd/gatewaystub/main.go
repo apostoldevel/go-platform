@@ -1,4 +1,4 @@
-// Command gatewaystub runs the contract stub of GatewayAPI's control plane
+// Command gatewaystub runs the stub of GatewayAPI's control plane
 // standalone: ws://<addr>/gateway/{module}/{instance}, a fake POST /oauth2/token
 // (client_credentials for the configured audience) and GET /gateway/list with
 // what the stub has seen. For running a GoAPI module without the real gateway.

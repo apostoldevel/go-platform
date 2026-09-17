@@ -1,5 +1,4 @@
-// Package pgtx runs one HTTP request as one database transaction
-// (contract K7):
+// Package pgtx runs one HTTP request as one database transaction:
 //
 //	BEGIN
 //	  SELECT * FROM api.authorize($sub, $agent, $host)
@@ -216,7 +215,7 @@ func (r *Runner) explain(ctx context.Context, err error) error {
 			lookup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 			defer cancel()
 			if r.Features.ParseMessage {
-				// the database's own cut of the message, separate transaction (§3)
+				// the database's own cut of the message, in a separate transaction
 				var pgErr *pgconn.PgError
 				errors.As(err, &pgErr)
 				var c int

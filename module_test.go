@@ -154,7 +154,7 @@ func TestUnknownRoute_404_ProblemJSON(t *testing.T) {
 
 // url.Values from r.URL.Query() drops a pair it cannot unescape and says
 // nothing; a filter that disappears turns a selection into "everything"
-// (T302 remark from the live run of T303). A query the host cannot parse is
+// (seen in a live run). A query the host cannot parse is
 // the client's error, before any route.
 func TestMalformedQuery_400_BeforeAnyRoute(t *testing.T) {
 	var seen pgtx.Session
@@ -183,7 +183,7 @@ func TestMalformedQuery_400_BeforeAnyRoute(t *testing.T) {
 }
 
 // ServeMux answers a non-canonical path with its own text/html redirect;
-// the gateway forwards the client's path verbatim (K7), so that answer would
+// the gateway forwards the client's path verbatim, so that answer would
 // reach the client. Every answer of the process is problem+json.
 func TestNonCanonicalPath_404_NotARedirect(t *testing.T) {
 	h := host(t, platform.Config{}, fake{name: "x", pref: []string{"/api/v2/x"}})

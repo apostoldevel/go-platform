@@ -1,5 +1,5 @@
 // Package frame implements the RPC JSON frame of the gateway control plane
-// (contract K1 — the WebSocketAPI frame {t,u,a,p,c,m}, restricted to CALL,
+// (the WebSocketAPI frame {t,u,a,p,c,m}, restricted to CALL,
 // CALLRESULT and CALLERROR).
 package frame
 
@@ -21,7 +21,8 @@ const (
 	CallError  Type = 4
 )
 
-// MaxSize is the largest frame accepted, in bytes (K1: 64 KiB → close 1009).
+// MaxSize is the largest frame accepted, in bytes (64 KiB; a larger one
+// closes the socket with 1009).
 const MaxSize = 64 * 1024
 
 // ErrTooLarge is returned by Parse for a frame above MaxSize.

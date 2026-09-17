@@ -2,7 +2,7 @@
 // (db/sql/platform/observer): the publishers of the pub/sub and the
 // caller's subscriptions to them, as /api/v2/observer — v1 rest.observer
 // without subscribe/unsubscribe. A subscription lives in a WebSocket
-// session (decision 15: events over WS, requests over HTTP), and its key is
+// session (events over WebSocket, requests over HTTP), and its key is
 // a session code, which is a credential and stays off the wire: v2 reads
 // the listeners of the caller's own session only, without the code, and
 // writes none.
