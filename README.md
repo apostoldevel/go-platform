@@ -45,7 +45,7 @@ lib/
   auth/jwt/            HS256/384/512 verification with the secrets of the OAuth2 providers; Keyring, Claims
   gateway/frame/       the control-plane frame {t,u,a,p,c,m}: CALL, CALLRESULT, CALLERROR; 64 KiB limit
   gatewayclient/       connect, /register, heartbeat, /status, /unregister; /ping, /drain, /reload; reconnect
-  pgtx/                one request = one transaction: api.authorize → api.* → api.log_request → COMMIT | ROLLBACK
+  pgtx/                one request = one transaction: api.authorize → SAVEPOINT → api.* → api.log_request → COMMIT; a refusal is journalled too
   problem/             application/problem+json with the database's error catalogue
   query/               ?filter[…]&sort=&fields=&page[limit]= → the search/orderby/fields jsonb of api.sql()
   rest/                the shape of a resource: list, row + ETag, create/update/delete, Idempotency-Key, If-Match
@@ -68,7 +68,7 @@ type Module interface {
 }
 ```
 
-`platform.New(cfg, modules…)` composes modules into the one `http.Handler` a process serves. Before any route it verifies the bearer token with `cfg.Keys`, establishes the session (`code` = JWT `sub`, agent and host from the headers the gateway forwards), returns `X-Request-Id` unchanged, counts the request in-flight and parses the query string; two modules claiming the same prefix are refused at start-up, not at `/register`. `platform.Prefixes(modules…)` is the union of the prefixes in registration order, with a prefix nested under another one of the same process left out — the gateway routes by longest prefix and refuses an overlap.
+`platform.New(cfg, modules…)` composes modules into the one `http.Handler` a process serves. Before any route it verifies the bearer token with `cfg.Keys`, establishes the session (`code` = JWT `sub`, agent from `User-Agent`, host decided from `X-Forwarded-For` and the peer by `cfg.TrustedProxies`), returns `X-Request-Id` unchanged, counts the request in-flight and parses the query string; two modules claiming the same prefix are refused at start-up, not at `/register`. `platform.Prefixes(modules…)` is the union of the prefixes in registration order, with a prefix nested under another one of the same process left out — the gateway routes by longest prefix and refuses an overlap.
 
 Inside a handler, `platform.SessionOf(r)` is the session and `rest.Doer` (a `pgtx.Runner` in production) runs the transaction:
 
@@ -95,10 +95,13 @@ One HTTP request is one database transaction (`lib/pgtx`):
 ```
 BEGIN
   SELECT * FROM api.authorize($session, $agent, $host)   -- or api.authorize_local when the database has it
+  SAVEPOINT request                                      -- when the database journals
   … the handler's api.* calls …
-  SELECT api.log_request(…)                              -- when the database has it
+  SELECT api.log_request(…, status)                      -- when the database has it
 COMMIT
 ```
+
+A refusal is journalled as well: the handler's work is undone with `ROLLBACK TO SAVEPOINT`, the error is explained, then `api.log_request(…, 4xx)` runs under the session context set before the savepoint (it survives the partial rollback) and the transaction commits with the audit row alone — `db.api_log` shows who was refused what, the way `api.run` shows it for v1. A session the database refuses is journalled without one — whether `api.authorize_local` answered `false` (`401`) or raised (IP table, locked user, expired password: the catalogue code's status, in a fresh transaction, since the raise aborted the request's); a token the host refuses never reaches the database. The audit row is written under a context of its own, so a client that gave up on the answer does not take the row with it. `pgtx.Request.LogID` is the row written.
 
 Session context in db-platform is per transaction, not per connection: under a pool the next request would otherwise inherit a stranger's session, so nothing of a request runs outside its transaction. On an error the transaction is rolled back and the message is explained by the database's catalogue (`api.parse_message`) on a separate connection, in its own transaction, and returned as `problem+json`; an aborted transaction cannot run the query that explains its own error. `Runner.Detect` probes once at start which of `api.authorize_local`, `api.log_request` and `api.parse_message` the database offers.
 
@@ -178,6 +181,7 @@ The library reads no environment itself; the process does and passes the values 
 | | |
 |---|---|
 | `platform.Config.Keys` | the secrets of the OAuth2 providers whose tokens the process accepts (`jwt.Keyring`: audience → secret and algorithm), the same keys `AuthServer` signs with |
+| `platform.Config.TrustedProxies` | the proxies whose `X-Forwarded-For` is believed (`platform.ParseTrustedProxies("10.0.0.0/8, 172.20.0.1")`). Nil: only the peer is — the client is the **last** element, the one the peer appended (the gateway sends exactly one); with a list the client is the rightmost address not in it, and a peer outside the list is the client itself (nginx `real_ip_recursive`, Express `trust proxy`); an empty list trusts nobody. An element that is not an address stops the walk at the last address read (the proxy that wrote it, or the peer) — never at "no address": a NULL host is "no restriction" to the database's IP tables |
 | `pgtx.NewPool(ctx, dsn)` | the database, as the API role of db-platform (not a superuser: a call that works as superuser and fails as the API role is a missing grant) |
 | `gatewayclient.Config` | `URL` (`ws://gateway:port/gateway`), `Module`, `Instance`, `Address` or `ListenPort`, `Capacity`, `Token` |
 

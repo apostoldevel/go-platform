@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -118,7 +119,7 @@ func TestUnauthorized_401_BeforeAnyRoute(t *testing.T) {
 	}
 }
 
-func TestSessionOf_CarriesTokenSubjectAgentAndFirstForwardedFor(t *testing.T) {
+func TestSessionOf_CarriesTokenSubjectAgentAndClientAddress(t *testing.T) {
 	var seen pgtx.Session
 	h := host(t, platform.Config{}, fake{name: "x", pref: []string{"/api/v2/x"}, seen: &seen})
 	sub := strings.Repeat("a", 40)
@@ -126,8 +127,102 @@ func TestSessionOf_CarriesTokenSubjectAgentAndFirstForwardedFor(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
 	}
-	if seen.Code != sub || seen.Agent != "ua/1" || seen.Host != "10.0.0.1" {
+	// no trusted list: the peer (the gateway) is the only trusted proxy, the
+	// client is what it appended — the last element, never the first
+	if seen.Code != sub || seen.Agent != "ua/1" || seen.Host != "10.0.0.2" {
 		t.Fatalf("%+v", seen)
+	}
+}
+
+// The client's address, as nginx real_ip_recursive and Express trust proxy
+// decide it: httptest's peer is 192.0.2.1.
+func TestClientAddress_TrustedProxies(t *testing.T) {
+	peerTrusted, _ := platform.ParseTrustedProxies("192.0.2.0/24, 10.0.0.0/8")
+	none, _ := platform.ParseTrustedProxies("")
+	for name, c := range map[string]struct {
+		trusted []netip.Prefix
+		xff     []string
+		want    string
+	}{
+		"nil, no header: the peer":              {nil, nil, "192.0.2.1"},
+		"nil: last element":                     {nil, []string{"1.2.3.4, 10.0.0.1, 10.0.0.2"}, "10.0.0.2"},
+		"nil: two headers, last of the last":    {nil, []string{"1.2.3.4", "10.0.0.1, 10.0.0.2"}, "10.0.0.2"},
+		"nil: a port and a mapped address":      {nil, []string{"[::ffff:203.0.113.9]:8080"}, "203.0.113.9"},
+		"nil: v4 with a port":                   {nil, []string{"203.0.113.9:8080"}, "203.0.113.9"},
+		"nil: junk last, the peer":              {nil, []string{"1.2.3.4, unknown"}, "192.0.2.1"},
+		"trusted: rightmost untrusted":          {peerTrusted, []string{"1.2.3.4, 203.0.113.5, 10.0.0.1, 10.0.0.2"}, "203.0.113.5"},
+		"trusted: the forged left part ignored": {peerTrusted, []string{"9.9.9.9, 203.0.113.5, 10.0.0.1"}, "203.0.113.5"},
+		"trusted: all trusted, the leftmost":    {peerTrusted, []string{"10.0.0.1, 10.0.0.2"}, "10.0.0.1"},
+		"trusted: no header, the peer":          {peerTrusted, nil, "192.0.2.1"},
+		"trusted: junk stops at the last proxy": {peerTrusted, []string{"1.2.3.4, unknown, 10.0.0.1"}, "10.0.0.1"},
+		"trusted: junk last, the peer":          {peerTrusted, []string{"1.2.3.4, unknown"}, "192.0.2.1"},
+		"trusted: mapped CIDR trusts v4":        {mustPrefixes(t, "::ffff:192.0.2.0/120, 10.0.0.0/8"), []string{"203.0.113.5, 10.0.0.1"}, "203.0.113.5"},
+		"trusted: bracketed IPv6 client":        {peerTrusted, []string{"[2001:db8::1], 10.0.0.1"}, "2001:db8::1"},
+		"none: the peer, header ignored":        {none, []string{"1.2.3.4, 10.0.0.1"}, "192.0.2.1"},
+		"peer not trusted: the peer":            {mustPrefixes(t, "10.0.0.0/8"), []string{"1.2.3.4, 10.0.0.1"}, "192.0.2.1"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var seen pgtx.Session
+			h := host(t, platform.Config{TrustedProxies: c.trusted}, fake{name: "x", pref: []string{"/api/v2/x"}, seen: &seen})
+			req := httptest.NewRequest("GET", "/api/v2/x", strings.NewReader(""))
+			req.Header.Set("Authorization", "Bearer "+token("s"))
+			for _, v := range c.xff {
+				req.Header.Add("X-Forwarded-For", v)
+			}
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != 200 {
+				t.Fatalf("%d %s", rec.Code, rec.Body)
+			}
+			if seen.Host != c.want {
+				t.Fatalf("host %q, want %q", seen.Host, c.want)
+			}
+		})
+	}
+}
+
+// The peer branch of addrOf with an IPv6 peer: httptest only gives a v4 one.
+func TestClientAddress_IPv6Peer(t *testing.T) {
+	var seen pgtx.Session
+	h := host(t, platform.Config{TrustedProxies: mustPrefixes(t, "2001:db8::/32")}, fake{name: "x", pref: []string{"/api/v2/x"}, seen: &seen})
+	req := httptest.NewRequest("GET", "/api/v2/x", strings.NewReader(""))
+	req.RemoteAddr = "[2001:db8::7]:4321"
+	req.Header.Set("Authorization", "Bearer "+token("s"))
+	req.Header.Set("X-Forwarded-For", "203.0.113.5, [2001:db8::8]:1")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 || seen.Host != "203.0.113.5" {
+		t.Fatalf("%d %q", rec.Code, seen.Host)
+	}
+	req.Header.Del("X-Forwarded-For")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	if seen.Host != "2001:db8::7" {
+		t.Fatalf("no header: %q", seen.Host)
+	}
+}
+
+func mustPrefixes(t *testing.T, list string) []netip.Prefix {
+	t.Helper()
+	p, err := platform.ParseTrustedProxies(list)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestParseTrustedProxies(t *testing.T) {
+	p, err := platform.ParseTrustedProxies(" 10.0.0.0/8 ,172.20.0.1, ::ffff:192.0.2.7 ")
+	if err != nil || len(p) != 3 || p[0].String() != "10.0.0.0/8" || p[1].String() != "172.20.0.1/32" || p[2].String() != "192.0.2.7/32" {
+		t.Fatalf("%v %v", p, err)
+	}
+	if p, err := platform.ParseTrustedProxies("::ffff:10.0.0.0/104"); err != nil || len(p) != 1 || p[0].String() != "10.0.0.0/8" {
+		t.Fatalf("mapped CIDR must be unmapped: %v %v", p, err)
+	}
+	if p, err := platform.ParseTrustedProxies(""); err != nil || p == nil || len(p) != 0 {
+		t.Fatalf("empty must be an empty list, not nil: %v %v", p, err)
+	}
+	if _, err := platform.ParseTrustedProxies("10.0.0.0/8, gateway"); err == nil {
+		t.Fatal("a name is not an address")
 	}
 }
 

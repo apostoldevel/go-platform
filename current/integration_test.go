@@ -3,13 +3,16 @@
 package current
 
 import (
+	"context"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 
 	platform "github.com/apostoldevel/go-platform"
 	"github.com/apostoldevel/go-platform/internal/resttest"
 	"github.com/apostoldevel/go-platform/lib/pgtx"
+	"github.com/jackc/pgx/v5"
 )
 
 func live(t *testing.T) *resttest.Live {
@@ -34,14 +37,23 @@ func getMe(t *testing.T, l *resttest.Live) me {
 	return m
 }
 
-func withoutInputCounters(t *testing.T, row json.RawMessage) json.RawMessage {
+// withoutSessionTraces drops what any session of the same user moves between
+// two reads: the input_* counters (every authorized request), state and
+// statetext (another session's login or signout of this user — the
+// packages of the suite run in parallel under one account) and lc_ip (the
+// host of that user's last login). They belong to the user, not to the
+// session, and are not what the parity is about. status/statustext and
+// lock_date are the same class but flip only when the user's last session
+// closes or on the first login after that — stable while the reader's own
+// session lives, so they stay in.
+func withoutSessionTraces(t *testing.T, row json.RawMessage) json.RawMessage {
 	t.Helper()
 	var m map[string]any
 	if err := json.Unmarshal(row, &m); err != nil {
 		t.Fatal(err)
 	}
 	for k := range m {
-		if strings.HasPrefix(k, "input_") {
+		if strings.HasPrefix(k, "input_") || k == "state" || k == "statetext" || k == "lc_ip" {
 			delete(m, k)
 		}
 	}
@@ -66,8 +78,7 @@ func TestIntegration_MeIsTheSevenReads(t *testing.T) {
 	} {
 		got, want := parts[part], l.Direct(t, sql)
 		if part == "user" {
-			// every authorized request bumps the user's input_* counters: not part of the parity
-			got, want = withoutInputCounters(t, got), withoutInputCounters(t, want)
+			got, want = withoutSessionTraces(t, got), withoutSessionTraces(t, want)
 		}
 		if !resttest.SameJSON(got, want) {
 			t.Fatalf("%s: %s", part, parts[part])
@@ -115,5 +126,41 @@ func TestIntegration_PatchMeLocaleAndOperDate(t *testing.T) {
 	}
 	if rec = l.Call("PATCH", "/api/v2/me", `{"area":"7f3a0000-0000-4000-8000-000000000001"}`); rec.Code != 404 && rec.Code != 400 {
 		t.Fatalf("unknown area: %d %s", rec.Code, rec.Body)
+	}
+}
+
+// The suite's packages run in parallel under one account: another session
+// of the same user logging in from another host and out again between the
+// two reads of the parity moved state/statetext/lc_ip (1 of 11 runs, T172).
+// Done here on purpose, the parity must hold.
+func TestIntegration_MeParityUnderAnotherSessionOfTheUser(t *testing.T) {
+	l := live(t)
+	rec := l.Call("GET", "/api/v2/me", "")
+	var parts map[string]json.RawMessage
+	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &parts) != nil {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	admin := os.Getenv("GO_TEST_ADMIN_DSN")
+	cfg, _ := pgx.ParseConfig(admin)
+	conn, err := pgx.Connect(context.Background(), admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(context.Background())
+	var other string
+	if err := conn.QueryRow(context.Background(), "SELECT session FROM api.login($1, $2, 'go-current-other', '10.255.255.254')", cfg.User, cfg.Password).Scan(&other); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Exec(context.Background(), "SELECT api.signout($1)", other); err != nil {
+		t.Fatal(err)
+	}
+	got, want := parts["user"], l.Direct(t, "SELECT row_to_json(t) FROM api.current_user() t")
+	if resttest.SameJSON(got, want) {
+		// Login writes lc_ip unconditionally: a raw match means the race was
+		// not reproduced, and the exclusion below would be proving nothing
+		t.Fatal("the other session left no trace: the race was not reproduced")
+	}
+	if got, want = withoutSessionTraces(t, got), withoutSessionTraces(t, want); !resttest.SameJSON(got, want) {
+		t.Fatalf("user:\n v2 %s\n sql %s", got, want)
 	}
 }

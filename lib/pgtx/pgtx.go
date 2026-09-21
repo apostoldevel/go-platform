@@ -1,11 +1,21 @@
 // Package pgtx runs one HTTP request as one database transaction:
 //
 //	BEGIN
-//	  SELECT * FROM api.authorize($sub, $agent, $host)
+//	  SELECT * FROM api.authorize_local($sub, $agent, $host)
+//	  SAVEPOINT request                    -- when the database journals (gateway patch)
 //	  … the handler's api.* calls …
-//	  SELECT api.log_request(…)            -- when the database has it (gateway patch)
-//	COMMIT | ROLLBACK → the error is explained by the catalogue in a
-//	                    separate transaction → problem+json
+//	  SELECT api.log_request(…, status)    -- 2xx: in the same transaction
+//	COMMIT
+//
+// A refusal is journalled too: the handler's work is undone with ROLLBACK
+// TO SAVEPOINT, the error is explained by the catalogue in a separate
+// transaction (the aborted one cannot run the query that explains its own
+// error), then api.log_request(…, 4xx) runs under the session context that
+// api.authorize_local set before the savepoint — it survives the partial
+// rollback — and the transaction commits with the audit row alone. A
+// session the database refuses (401: unknown, or raised — locked user,
+// expired password, IP table) is journalled without a session, in a fresh
+// transaction when authorize aborted the request's one.
 //
 // Session context is per transaction here — under a pool the next request
 // would otherwise inherit a stranger's session — so every api.* call of a
@@ -29,7 +39,8 @@ import (
 )
 
 // Session identifies the caller: the session code from the verified JWT's
-// `sub`, the client's User-Agent and address (X-Forwarded-For).
+// `sub`, the client's User-Agent and address (the host decides it from
+// X-Forwarded-For and the peer; platform.Config.TrustedProxies).
 type Session struct {
 	Code  string
 	Agent string
@@ -52,13 +63,16 @@ type Runner struct {
 }
 
 // Request describes the HTTP request for api.log_request. The handler may
-// set Status inside fn (201, 204); default 200.
+// set Status inside fn (201, 204); default 200. On a refusal the status
+// journalled is the problem's. LogID is the db.api_log row Do wrote, 0 when
+// the database does not journal or Do could not confirm the row.
 type Request struct {
 	Method    string
 	Path      string
 	Payload   []byte // jsonb or nil
 	RequestID string // X-Request-Id, a UUID
 	Status    int
+	LogID     int64
 }
 
 func (r *Request) status() int {
@@ -129,6 +143,9 @@ func NewPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 // handler can write it as is.
 func (r *Runner) Do(ctx context.Context, s Session, req *Request, fn func(ctx context.Context, tx pgx.Tx) error) error {
 	started := time.Now()
+	if req != nil {
+		req.LogID = 0
+	}
 	tx, err := r.Pool.Begin(ctx)
 	if err != nil {
 		return r.internal("begin", err)
@@ -141,36 +158,112 @@ func (r *Runner) Do(ctx context.Context, s Session, req *Request, fn func(ctx co
 	if ip := net.ParseIP(s.Host); ip != nil {
 		host = ip.String()
 	}
+	journal := r.Features.LogRequest && req != nil
 	if err := tx.QueryRow(ctx, r.authorizeSQL(), s.Code, nilIfEmpty(s.Agent), host).Scan(&authorized, &message); err != nil {
-		return r.explain(ctx, err)
+		p := r.explain(ctx, err)
+		if journal {
+			// the refusal aborted the transaction before any savepoint; there
+			// is no session context to keep, so a fresh one journals it
+			jctx, cancel := journalCtx(ctx)
+			defer cancel()
+			_ = tx.Rollback(jctx)
+			if fresh, berr := r.Pool.Begin(jctx); berr == nil {
+				r.journalRefusal(jctx, fresh, req, started, p)
+				_ = fresh.Rollback(jctx)
+			} else if r.Logger != nil {
+				r.Logger.Error("refusal not journalled", "where", "begin", "err", berr)
+			}
+		}
+		return p
 	}
 	if !authorized {
 		detail := ""
 		if message != nil {
 			detail = *message
 		}
-		return problem.New(401, "unauthorized", "Unauthorized", detail)
+		p := problem.New(401, "unauthorized", "Unauthorized", detail)
+		if journal {
+			// no session context to lose: the row carries the path and the
+			// status, api_log.session stays empty
+			jctx, cancel := journalCtx(ctx)
+			defer cancel()
+			r.journalRefusal(jctx, tx, req, started, p)
+		}
+		return p
+	}
+	if journal {
+		if _, err := tx.Exec(ctx, "SAVEPOINT request"); err != nil {
+			return r.internal("savepoint", err)
+		}
 	}
 	if err := fn(ctx, tx); err != nil {
-		return r.explain(ctx, err)
+		p := r.explain(ctx, err)
+		if journal {
+			// undo the handler's work, keep the session context set before
+			// the savepoint; a transaction that cannot roll back to it
+			// (connection gone) has nothing to journal on
+			jctx, cancel := journalCtx(ctx)
+			defer cancel()
+			if _, rerr := tx.Exec(jctx, "ROLLBACK TO SAVEPOINT request"); rerr == nil {
+				r.journalRefusal(jctx, tx, req, started, p)
+			} else if r.Logger != nil {
+				r.Logger.Error("refusal not journalled", "where", "rollback to savepoint", "err", rerr)
+			}
+		}
+		return p
 	}
-	if r.Features.LogRequest && req != nil {
-		var payload any
-		if len(req.Payload) > 0 {
-			payload = req.Payload
-		}
-		var rid any
-		if req.RequestID != "" && isUUID(req.RequestID) {
-			rid = req.RequestID
-		}
-		if _, err := tx.Exec(ctx, "SELECT api.log_request($1, $2, $3::jsonb, $4, $5::interval, $6::uuid)", req.Method, req.Path, payload, req.status(), time.Since(started), rid); err != nil {
+	if journal {
+		if err := r.logRequest(ctx, tx, req, started, req.status()); err != nil {
 			return r.explain(ctx, err)
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
+		if req != nil {
+			req.LogID = 0 // the deferred rollback discards the row
+		}
 		return r.explain(ctx, err)
 	}
 	return nil
+}
+
+// journalCtx is the context the audit row is written under: the client
+// that gave up on the answer does not take the row with it.
+func journalCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+}
+
+// logRequest writes the db.api_log row for the request's outcome.
+func (r *Runner) logRequest(ctx context.Context, tx pgx.Tx, req *Request, started time.Time, status int) error {
+	var payload any
+	if len(req.Payload) > 0 {
+		payload = req.Payload
+	}
+	var rid any
+	if req.RequestID != "" && isUUID(req.RequestID) {
+		rid = req.RequestID
+	}
+	return tx.QueryRow(ctx, "SELECT api.log_request($1, $2, $3::jsonb, $4, $5::interval, $6::uuid)", req.Method, req.Path, payload, status, time.Since(started), rid).Scan(&req.LogID)
+}
+
+// journalRefusal commits the audit row of a refused request under a
+// journalCtx; the answer to the client is the problem either way — an audit
+// that cannot be written is logged, not turned into a second error.
+func (r *Runner) journalRefusal(ctx context.Context, tx pgx.Tx, req *Request, started time.Time, p error) {
+	status := 500
+	var pr *problem.Problem
+	if errors.As(p, &pr) {
+		status = pr.Status
+	}
+	err := r.logRequest(ctx, tx, req, started, status)
+	if err == nil {
+		err = tx.Commit(ctx)
+	}
+	if err != nil {
+		req.LogID = 0
+		if r.Logger != nil {
+			r.Logger.Error("refusal not journalled", "where", "log_request", "status", status, "err", err)
+		}
+	}
 }
 
 type kind int

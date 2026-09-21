@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"path"
 	"strings"
@@ -44,6 +45,15 @@ type Config struct {
 	Keys     jwt.Keyring
 	Now      func() time.Time
 	InFlight interface{ Add(int32) int32 }
+	// TrustedProxies are the proxies whose X-Forwarded-For is believed
+	// (ParseTrustedProxies reads a list). Nil: only the peer is — the client
+	// is the last element, the one the peer appended (the gateway sends
+	// exactly one). With a list the client is the rightmost address not in
+	// it, walking from the peer's end; a peer outside the list is the client
+	// itself and its header is ignored (nginx real_ip_recursive, Express
+	// trust proxy). An element that is not an address stops the walk at the
+	// last address read, never at "no address".
+	TrustedProxies []netip.Prefix
 }
 
 type host struct {
@@ -129,7 +139,7 @@ func (h *host) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		problem.New(401, "unauthorized", "Unauthorized", err.Error()).Write(w, r)
 		return
 	}
-	sess := pgtx.Session{Code: claims.Sub, Agent: r.Header.Get("User-Agent"), Host: firstForwardedFor(r)}
+	sess := pgtx.Session{Code: claims.Sub, Agent: r.Header.Get("User-Agent"), Host: clientAddr(r, h.cfg.TrustedProxies)}
 	r = r.WithContext(context.WithValue(r.Context(), sessionKey, sess))
 	// every answer of the process is problem+json: the mux's own 404/405 are
 	// plain text, and a non-canonical path gets its text/html redirect — with a
@@ -179,10 +189,107 @@ func canonical(p string) bool {
 	return c == p
 }
 
-func firstForwardedFor(r *http.Request) string {
-	xff := r.Header.Get("X-Forwarded-For")
-	if i := strings.IndexByte(xff, ','); i >= 0 {
-		xff = xff[:i]
+// ParseTrustedProxies reads a comma-separated list of CIDRs and addresses
+// ("10.0.0.0/8, 172.20.0.1"). An empty list is not nil: it trusts no proxy,
+// so the peer is the client and its header is ignored.
+func ParseTrustedProxies(list string) ([]netip.Prefix, error) {
+	out := []netip.Prefix{}
+	for _, s := range strings.Split(list, ",") {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		if p, err := netip.ParsePrefix(s); err == nil {
+			if p.Addr().Is4In6() { // addresses are compared unmapped
+				p = netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-96)
+			}
+			out = append(out, p.Masked())
+			continue
+		}
+		a, err := netip.ParseAddr(s)
+		if err != nil {
+			return nil, fmt.Errorf("trusted proxies: %q is neither a CIDR nor an address", s)
+		}
+		a = a.Unmap()
+		out = append(out, netip.PrefixFrom(a, a.BitLen()))
 	}
-	return strings.TrimSpace(xff)
+	return out, nil
+}
+
+// clientAddr decides the client's address for the session and the audit.
+// The header is a chain the proxies appended to, client first; every
+// element a client wrote itself is on the left of the ones the trusted
+// proxies wrote, so the walk goes from the right. An element that is not an
+// address ends the walk with the last address read (the proxy that wrote
+// it, or the peer) — never with none: a NULL host is "no restriction" to
+// the database's IP tables, and the client must not be able to choose it.
+func clientAddr(r *http.Request, trusted []netip.Prefix) string {
+	peer, ok := addrOf(r.RemoteAddr)
+	last := ""
+	if ok {
+		last = peer.String()
+	}
+	chain := forwardedChain(r.Header.Values("X-Forwarded-For"))
+	if trusted == nil {
+		if len(chain) == 0 {
+			return last
+		}
+		if a, ok := addrOf(chain[len(chain)-1]); ok {
+			return a.String()
+		}
+		return last
+	}
+	if !ok || !isTrusted(peer, trusted) {
+		return last
+	}
+	for i := len(chain) - 1; i >= 0; i-- {
+		a, ok := addrOf(chain[i])
+		if !ok {
+			return last
+		}
+		last = a.String()
+		if !isTrusted(a, trusted) {
+			break
+		}
+	}
+	return last
+}
+
+// forwardedChain flattens repeated X-Forwarded-For headers into one list,
+// in order, blanks dropped.
+func forwardedChain(values []string) []string {
+	var chain []string
+	for _, v := range values {
+		for _, e := range strings.Split(v, ",") {
+			if e = strings.TrimSpace(e); e != "" {
+				chain = append(chain, e)
+			}
+		}
+	}
+	return chain
+}
+
+// addrOf reads an address as a proxy writes it: bare, with a port, bracketed,
+// IPv4-mapped; the zone of a link-local address is dropped.
+func addrOf(s string) (netip.Addr, bool) {
+	if ap, err := netip.ParseAddrPort(s); err == nil {
+		return ap.Addr().Unmap().WithZone(""), true
+	}
+	if strings.HasPrefix(s, "[") && strings.HasSuffix(s, "]") {
+		s = s[1 : len(s)-1]
+	}
+	a, err := netip.ParseAddr(s)
+	if err != nil {
+		return netip.Addr{}, false
+	}
+	return a.Unmap().WithZone(""), true
+}
+
+func isTrusted(a netip.Addr, trusted []netip.Prefix) bool {
+	for _, p := range trusted {
+		if p.Contains(a) {
+			return true
+		}
+	}
+	return false
 }
