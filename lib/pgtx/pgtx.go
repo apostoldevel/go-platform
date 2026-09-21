@@ -273,6 +273,7 @@ const (
 	kindCatalogue              // RAISE 'ERR-GGG-CCC: text'
 	kindRaise                  // RAISE without a catalogue code
 	kindConstraint             // SQLSTATE class 23: a constraint refused the client's data
+	kindData                   // SQLSTATE class 22: the client's data did not read (a bad uuid, a number out of range, bad base64)
 	kindInternal               // anything else
 )
 
@@ -291,6 +292,9 @@ func classify(err error) (code, detail string, k kind) {
 	}
 	if pg != nil && strings.HasPrefix(pg.Code, "23") {
 		return pg.Code, pg.Message, kindConstraint
+	}
+	if pg != nil && strings.HasPrefix(pg.Code, "22") {
+		return pg.Code, pg.Message, kindData
 	}
 	return "", "", kindInternal
 }
@@ -338,6 +342,10 @@ func (r *Runner) explain(ctx context.Context, err error) error {
 		if code == "23505" { // unique_violation
 			return problem.New(409, "conflict", "Conflict", detail)
 		}
+		return problem.New(400, "validation", "Bad request", detail)
+	case kindData:
+		// what the database could not read as the type it expected is the
+		// client's to fix, not an internal failure — the same 400 v1 sends
 		return problem.New(400, "validation", "Bad request", detail)
 	}
 	return r.internal("request", err)

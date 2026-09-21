@@ -166,7 +166,7 @@ One package per SQL module of db-platform, in the order of its `create.psql`; th
 | `current` | `session`, `current` | `me` (`GET` — the session's area, interface, locale, operating date, user in one object; `PATCH` — `set_session_*`) |
 | `workflow` | `workflow` | `entities`, `types`, `classes`, `states`, `state-types`, `actions`, `methods`, `transitions`, `events`, `event-types`, `priorities` |
 | `kladr` | `kladr` | `kladr`, `kladr/{id}/history`, `kladr/string` |
-| `entity/object` | `entity/object` | `objects`, `objects/{id}/methods`, `objects/{id}/actions/{action}`, `search` |
+| `entity/object` | `entity/object` | `objects`, `objects/{id}/methods`, `objects/{id}/actions/{action}`, `objects/{id}/methods/{method}`, `objects/{id}/access` (`GET` the entries, `PUT` one grant — `api.chmodo`; `access/decode[?userid=]` the bits of one user), `objects/{id}/files` (`GET` list with total, `POST` a JSON array of files — `api.set_object_files_json`, `DELETE` clears; `files/{file}` `GET` with the bytes, `DELETE`), `search`. The rest of the platform's `rest.object` dispatcher (class, type, state and method history, groups, links, data, addresses, geolocation) and `rest.document`/`rest.reference` have no consumer and no form here |
 | `notification` | `notification` | `notifications`, `notifications/since`, `notifications/changed` |
 | `verification` | `verification` | `verification/codes`, `verification/codes/confirm` |
 | `observer` | `observer` | `observer/publishers`, `observer/listeners` (the caller's own session, read only) |

@@ -212,8 +212,8 @@ func (m *module) Routes(mux *http.ServeMux) {
 		rw.Routes(mux, d, m.idem, log)
 	}
 	mux.HandleFunc("POST "+classes.Prefix+"/{id}/actions/{action}", m.classAction)
-	m.accessRoutes(mux, classes.Resource, "api.class_access", "api.decode_class_access", m.chmodc)
-	m.accessRoutes(mux, methods.Resource, "api.method_access", "api.decode_method_access", m.chmodm)
+	rest.Access{Resource: classes.Resource, ListFn: "api.class_access", DecodeFn: "api.decode_class_access", MaxMask: rest.MaskBits10, ClassOptions: true, Set: m.chmodc}.Routes(mux, m.cfg.Doer, m.log)
+	rest.Access{Resource: methods.Resource, ListFn: "api.method_access", DecodeFn: "api.decode_method_access", MaxMask: rest.MaskBits6, Set: m.chmodm}.Routes(mux, m.cfg.Doer, m.log)
 }
 
 // classAction is POST /classes/{id}/actions/{action}: copy {destination} —
@@ -288,27 +288,10 @@ func (m *module) classAction(w http.ResponseWriter, r *http.Request) {
 }
 
 // ── access: class rights (ACU) and method rights (AMU) ─────────────────
+// The routes are rest.Access (shared with the object's AOU); here only
+// what api.chmodc / chmodm take — the mask's width is bounded there.
 
-// accessBody is one grant: the user (or group) and the mask; for a class
-// also whether to descend the class tree and to rewrite existing objects.
-type accessBody struct {
-	UserID    string `json:"userid"`
-	Mask      *int   `json:"mask"`
-	Recursive *bool  `json:"recursive"`
-	ObjectSet *bool  `json:"objectset"`
-}
-
-func (b *accessBody) validate() error {
-	if !rest.IsUUID(b.UserID) {
-		return problem.New(400, "validation", "Bad request", "userid is required")
-	}
-	if b.Mask == nil || *b.Mask < 0 {
-		return problem.New(400, "validation", "Bad request", "mask is required")
-	}
-	return nil
-}
-
-func (m *module) chmodc(ctx context.Context, tx pgx.Tx, id string, b accessBody) error {
+func (m *module) chmodc(ctx context.Context, tx pgx.Tx, id string, b rest.AccessBody) error {
 	recursive, objectSet := true, false // the defaults of api.chmodc
 	if b.Recursive != nil {
 		recursive = *b.Recursive
@@ -320,95 +303,7 @@ func (m *module) chmodc(ctx context.Context, tx pgx.Tx, id string, b accessBody)
 	return err
 }
 
-func (m *module) chmodm(ctx context.Context, tx pgx.Tx, id string, b accessBody) error {
+func (m *module) chmodm(ctx context.Context, tx pgx.Tx, id string, b rest.AccessBody) error {
 	_, err := tx.Exec(ctx, "SELECT api.chmodm($1::uuid, $2::int, $3::uuid)", id, *b.Mask, b.UserID)
 	return err
-}
-
-// accessRoutes: GET <x>/{id}/access — who holds what (api.<x>_access);
-// PUT <x>/{id}/access {userid, mask, …} — one grant (api.chmodc / chmodm),
-// mask 0 revokes; GET <x>/{id}/access/decode[?userid=] — the bits of one
-// user, decoded (api.decode_<x>_access).
-func (m *module) accessRoutes(mux *http.ServeMux, res rest.Resource, listFn, decodeFn string, set func(context.Context, pgx.Tx, string, accessBody) error) {
-	mux.HandleFunc("GET "+res.Prefix+"/{id}/access", func(w http.ResponseWriter, r *http.Request) {
-		id, err := rest.IDOf(r)
-		if err != nil {
-			rest.Fail(w, r, m.log, err)
-			return
-		}
-		var rows []json.RawMessage
-		err = m.cfg.Doer.Do(r.Context(), platform.SessionOf(r), rest.ReqOf(r, 200, nil), func(ctx context.Context, tx pgx.Tx) error {
-			if _, err := res.GetRow(ctx, tx, id); err != nil {
-				return err
-			}
-			rows, err = rest.Rows(ctx, tx, "SELECT row_to_json(t) FROM "+listFn+"($1::uuid) t", id)
-			return err
-		})
-		if err != nil {
-			rest.Fail(w, r, m.log, err)
-			return
-		}
-		body, _ := json.Marshal(rows)
-		rest.WriteJSON(w, 200, body)
-	})
-	mux.HandleFunc("PUT "+res.Prefix+"/{id}/access", func(w http.ResponseWriter, r *http.Request) {
-		id, err := rest.IDOf(r)
-		if err != nil {
-			rest.Fail(w, r, m.log, err)
-			return
-		}
-		var b accessBody
-		raw, err := rest.ReadBody(r, &b)
-		if err == nil {
-			err = b.validate()
-		}
-		if err != nil {
-			rest.Fail(w, r, m.log, err)
-			return
-		}
-		var rows []json.RawMessage
-		err = m.cfg.Doer.Do(r.Context(), platform.SessionOf(r), rest.ReqOf(r, 200, raw), func(ctx context.Context, tx pgx.Tx) error {
-			if _, err := res.GetRow(ctx, tx, id); err != nil {
-				return err
-			}
-			if err := set(ctx, tx, id, b); err != nil {
-				return err
-			}
-			rows, err = rest.Rows(ctx, tx, "SELECT row_to_json(t) FROM "+listFn+"($1::uuid) t", id)
-			return err
-		})
-		if err != nil {
-			rest.Fail(w, r, m.log, err)
-			return
-		}
-		body, _ := json.Marshal(rows)
-		rest.WriteJSON(w, 200, body)
-	})
-	mux.HandleFunc("GET "+res.Prefix+"/{id}/access/decode", func(w http.ResponseWriter, r *http.Request) {
-		id, err := rest.IDOf(r)
-		if err != nil {
-			rest.Fail(w, r, m.log, err)
-			return
-		}
-		var user *string
-		if u := r.URL.Query().Get("userid"); u != "" {
-			if !rest.IsUUID(u) {
-				rest.Fail(w, r, m.log, problem.New(400, "validation", "Bad request", "userid must be a UUID"))
-				return
-			}
-			user = &u
-		}
-		var row json.RawMessage
-		err = m.cfg.Doer.Do(r.Context(), platform.SessionOf(r), rest.ReqOf(r, 200, nil), func(ctx context.Context, tx pgx.Tx) error {
-			if _, err := res.GetRow(ctx, tx, id); err != nil {
-				return err
-			}
-			return tx.QueryRow(ctx, "SELECT row_to_json(t) FROM "+decodeFn+"($1::uuid, coalesce($2::uuid, api.current_userid())) t", id, user).Scan(&row)
-		})
-		if err != nil {
-			rest.Fail(w, r, m.log, err)
-			return
-		}
-		rest.WriteJSON(w, 200, row)
-	})
 }

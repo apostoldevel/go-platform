@@ -166,7 +166,7 @@ gw.Drain(context.Background(), "sigterm")             // затем остано
 | `current` | `session`, `current` | `me` (`GET` — область, интерфейс, локаль, операционная дата и пользователь сессии одним объектом; `PATCH` — `set_session_*`) |
 | `workflow` | `workflow` | `entities`, `types`, `classes`, `states`, `state-types`, `actions`, `methods`, `transitions`, `events`, `event-types`, `priorities` |
 | `kladr` | `kladr` | `kladr`, `kladr/{id}/history`, `kladr/string` |
-| `entity/object` | `entity/object` | `objects`, `objects/{id}/methods`, `objects/{id}/actions/{action}`, `search` |
+| `entity/object` | `entity/object` | `objects`, `objects/{id}/methods`, `objects/{id}/actions/{action}`, `objects/{id}/methods/{method}`, `objects/{id}/access` (`GET` — записи, `PUT` — одно право, `api.chmodo`; `access/decode[?userid=]` — биты одного пользователя), `objects/{id}/files` (`GET` список с `total`, `POST` — JSON-массив файлов, `api.set_object_files_json`, `DELETE` очищает; `files/{file}` — `GET` с байтами, `DELETE`), `search`. Остальное из платформенного диспетчера `rest.object` (класс, тип, история состояний и методов, группы, связи, данные, адреса, геолокация) и `rest.document`/`rest.reference` потребителя не имеют и формы здесь нет |
 | `notification` | `notification` | `notifications`, `notifications/since`, `notifications/changed` |
 | `verification` | `verification` | `verification/codes`, `verification/codes/confirm` |
 | `observer` | `observer` | `observer/publishers`, `observer/listeners` (только своя сессия, только чтение) |

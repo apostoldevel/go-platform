@@ -94,3 +94,22 @@ func TestRequest_DefaultStatus(t *testing.T) {
 		t.Fatal(req.status())
 	}
 }
+
+// A value the database could not read as its type (class 22: a bad uuid, a
+// number out of range, bad base64) is the client's — 400, not 500.
+func TestClassify_DataExceptionIsTheClients(t *testing.T) {
+	for _, code := range []string{"22P02", "22003", "22023", "22007"} {
+		_, detail, kind := classify(&pgconn.PgError{Code: code, Message: "invalid input syntax"})
+		if kind != kindData || detail != "invalid input syntax" {
+			t.Fatalf("%s: %q %v", code, detail, kind)
+		}
+	}
+	r := &Runner{}
+	if err := r.explain(context.Background(), &pgconn.PgError{Code: "22P02", Message: "invalid input syntax for type uuid"}); err == nil || !strings.Contains(err.Error(), "invalid input syntax") {
+		t.Fatalf("%v", err)
+	}
+	var p *problem.Problem
+	if !errors.As(r.explain(context.Background(), &pgconn.PgError{Code: "22P02", Message: "x"}), &p) || p.Status != 400 {
+		t.Fatalf("%v", p)
+	}
+}
