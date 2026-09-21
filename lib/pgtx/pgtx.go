@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"strings"
 	"time"
 
@@ -236,7 +237,7 @@ func (r *Runner) Do(ctx context.Context, s Session, req *Request, fn func(ctx co
 	}
 	journal := r.Features.LogRequest && req != nil
 	if err := tx.QueryRow(ctx, r.authorizeSQL(), s.Code, nilIfEmpty(s.Agent), host).Scan(&authorized, &message); err != nil {
-		p := r.explain(ctx, err)
+		p := r.explain(ctx, req, err)
 		if journal {
 			// the refusal aborted the transaction before any savepoint; there
 			// is no session context to keep, so a fresh one journals it
@@ -275,7 +276,7 @@ func (r *Runner) Do(ctx context.Context, s Session, req *Request, fn func(ctx co
 		}
 	}
 	if err := fn(ctx, tx); err != nil {
-		p := r.explain(ctx, err)
+		p := r.explain(ctx, req, err)
 		if journal {
 			// undo the handler's work, keep the session context set before
 			// the savepoint; a transaction that cannot roll back to it
@@ -292,14 +293,14 @@ func (r *Runner) Do(ctx context.Context, s Session, req *Request, fn func(ctx co
 	}
 	if journal {
 		if err := r.logRequest(ctx, tx, req, started, req.status(), ""); err != nil {
-			return r.explain(ctx, err)
+			return r.explain(ctx, req, err)
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		if req != nil {
 			req.LogID = 0 // the deferred rollback discards the row
 		}
-		return r.explain(ctx, err)
+		return r.explain(ctx, req, err)
 	}
 	return nil
 }
@@ -392,8 +393,10 @@ func classify(err error) (code, detail string, k kind) {
 }
 
 // explain turns the failure into a problem; the catalogue is consulted in a
-// fresh transaction because the failed one cannot run queries any more.
-func (r *Runner) explain(ctx context.Context, err error) error {
+// fresh transaction because the failed one cannot run queries any more. req
+// (may be nil) tells the method: the same constraint means a different thing
+// on a DELETE.
+func (r *Runner) explain(ctx context.Context, req *Request, err error) error {
 	code, detail, k := classify(err)
 	switch k {
 	case kindProblem:
@@ -431,7 +434,12 @@ func (r *Runner) explain(ctx context.Context, err error) error {
 		if r.Logger != nil {
 			r.Logger.Warn("constraint refused", "sqlstate", code, "err", detail)
 		}
-		if code == "23505" { // unique_violation
+		switch {
+		case code == "23505": // unique_violation
+			return problem.New(409, "conflict", "Conflict", detail)
+		case code == "23503" && req != nil && req.Method == http.MethodDelete:
+			// foreign_key_violation on a DELETE: the resource is still
+			// referenced — a conflict with its state, not bad input
 			return problem.New(409, "conflict", "Conflict", detail)
 		}
 		return problem.New(400, "validation", "Bad request", detail)

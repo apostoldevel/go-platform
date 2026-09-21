@@ -117,7 +117,7 @@ COMMIT
 | Удаление | `DELETE …/{id}` → `204` |
 | Действия | `POST …/{id}/actions/<verb>` для того, что не является изменением полей (методы workflow, `copy`, `clone`, …) |
 | Тела | JSON-объекты, неизвестные ключи отвергаются (`400`), как это делает `CheckJsonbKeys` в базе |
-| Ошибки | `application/problem+json`: `{type: "urn:apostol:error:ERR-400-032", title, status, detail, instance, request_id, code}`; код и текст — из каталога ошибок базы; ограничение, которое отвергла база, — `400` (`409` для дубликата ключа) |
+| Ошибки | `application/problem+json`: `{type: "urn:apostol:error:ERR-400-032", title, status, detail, instance, request_id, code}`; код и текст — из каталога ошибок базы; ограничение, которое отвергла база, — `400` (`409` для дубликата ключа и для внешнего ключа, отвергшего `DELETE` — на ресурс ещё ссылаются) |
 | Заголовки | `Authorization: Bearer <access token>` на входе, `X-Request-Id` на входе и на выходе без изменений |
 
 ### Что есть в v1 и чего нет в v2

@@ -117,7 +117,7 @@ Session context in db-platform is per transaction, not per connection: under a p
 | Delete | `DELETE …/{id}` → `204` |
 | Actions | `POST …/{id}/actions/<verb>` for what is not a field change (workflow methods, `copy`, `clone`, …) |
 | Bodies | JSON objects, unknown keys refused (`400`), as `CheckJsonbKeys` does in the database |
-| Errors | `application/problem+json`: `{type: "urn:apostol:error:ERR-400-032", title, status, detail, instance, request_id, code}`; the code and text come from the database's error catalogue; a constraint the database refuses is `400` (`409` for a duplicate key) |
+| Errors | `application/problem+json`: `{type: "urn:apostol:error:ERR-400-032", title, status, detail, instance, request_id, code}`; the code and text come from the database's error catalogue; a constraint the database refuses is `400` (`409` for a duplicate key, and for a foreign key that refuses a `DELETE` — the resource is still referenced) |
 | Headers | `Authorization: Bearer <access token>` in, `X-Request-Id` in and out unchanged |
 
 ### What v1 has that v2 does not
