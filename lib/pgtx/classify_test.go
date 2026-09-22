@@ -64,11 +64,19 @@ func TestClassify_ConstraintViolationIsTheClients(t *testing.T) {
 }
 
 func TestFeatures_FromProcNames(t *testing.T) {
-	f := featuresFrom([]string{"authorize", "authorize_local", "log_request"})
-	if !f.AuthorizeLocal || !f.LogRequest || f.ParseMessage {
+	f := featuresFrom([]proc{{"authorize", 3}, {"authorize_local", 3}, {"log_request", 6}})
+	if !f.AuthorizeLocal || !f.LogRequest || f.LogRequestErr || f.ParseMessage {
 		t.Fatalf("%+v", f)
 	}
-	if f := featuresFrom(nil); f.AuthorizeLocal || f.LogRequest || f.ParseMessage {
+	// db-platform 1.2.24: the seventh parameter pError — read off pronargs
+	if f := featuresFrom([]proc{{"log_request", 7}}); !f.LogRequest || !f.LogRequestErr {
+		t.Fatalf("%+v", f)
+	}
+	// both overloads present, in either order: the seven-argument call is the unambiguous one
+	if f := featuresFrom([]proc{{"log_request", 7}, {"log_request", 6}}); !f.LogRequestErr {
+		t.Fatalf("%+v", f)
+	}
+	if f := featuresFrom(nil); f.AuthorizeLocal || f.LogRequest || f.LogRequestErr || f.ParseMessage {
 		t.Fatalf("%+v", f)
 	}
 }

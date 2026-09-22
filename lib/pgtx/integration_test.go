@@ -209,10 +209,19 @@ func TestIntegration_AuthorizeLocalIsolatesWhenPatched(t *testing.T) {
 // journalled reads the db.api_log row Do wrote, under the same session.
 func journalled(t *testing.T, r *pgtx.Runner, code string, id int64) (username *string, session *string, status int, path string) {
 	t.Helper()
-	var request struct {
-		Status int    `json:"status"`
-		Method string `json:"method"`
-	}
+	u, s, req, p := journalledRow(t, r, code, id)
+	return u, s, req.Status, p
+}
+
+// requestOf is the _request object api.log_request writes into the row.
+type requestOf struct {
+	Status int    `json:"status"`
+	Method string `json:"method"`
+	Error  string `json:"error"` // the catalogue code of a refusal (1.2.24), absent otherwise
+}
+
+func journalledRow(t *testing.T, r *pgtx.Runner, code string, id int64) (username *string, session *string, request requestOf, path string) {
+	t.Helper()
 	err := r.Do(context.Background(), pgtx.Session{Code: code}, nil, func(ctx context.Context, tx pgx.Tx) error {
 		var body []byte
 		if err := tx.QueryRow(ctx, "SELECT username, session, path, json->'_request' FROM api.get_log($1::bigint)", id).Scan(&username, &session, &path, &body); err != nil {
@@ -223,7 +232,7 @@ func journalled(t *testing.T, r *pgtx.Runner, code string, id int64) (username *
 	if err != nil {
 		t.Fatalf("read api_log %d: %v", id, err)
 	}
-	return username, session, request.Status, path
+	return username, session, request, path
 }
 
 func patched(t *testing.T) (*pgtx.Runner, func(t *testing.T) string) {
@@ -259,9 +268,13 @@ func TestIntegration_HandlerRefusalIsJournalledUnderTheSession(t *testing.T) {
 	if req.LogID == 0 {
 		t.Fatal("refusal not journalled")
 	}
-	username, session, status, path := journalled(t, r, code, req.LogID)
-	if username == nil || session == nil || *session != code || status != 404 || path != req.Path {
-		t.Fatalf("row: user %v session %v status %d path %s", username, session, status, path)
+	username, session, request, path := journalledRow(t, r, code, req.LogID)
+	if username == nil || session == nil || *session != code || request.Status != 404 || path != req.Path {
+		t.Fatalf("row: user %v session %v status %d path %s", username, session, request.Status, path)
+	}
+	// a module-side refusal has no catalogue code: the row carries none
+	if request.Error != "" {
+		t.Fatalf("row: error %q for a refusal without a catalogue code", request.Error)
 	}
 	var operDate *time.Time
 	if err := r.Do(context.Background(), pgtx.Session{Code: code}, nil, func(ctx context.Context, tx pgx.Tx) error {
@@ -288,8 +301,22 @@ func TestIntegration_CatalogueRefusalIsJournalled(t *testing.T) {
 	if req.LogID == 0 {
 		t.Fatal("refusal not journalled")
 	}
-	if _, session, status, _ := journalled(t, r, code, req.LogID); session == nil || *session != code || status != p.Status {
-		t.Fatalf("row: session %v status %d ≠ %d", session, status, p.Status)
+	_, session, request, _ := journalledRow(t, r, code, req.LogID)
+	if session == nil || *session != code || request.Status != p.Status {
+		t.Fatalf("row: session %v status %d ≠ %d", session, request.Status, p.Status)
+	}
+	// db-platform 1.2.24: the catalogue code of the refusal is in the row
+	// (_request.error); an older api.log_request has no place for it
+	if p.Code == nil {
+		t.Fatalf("catalogue refusal without a code: %v", p)
+	}
+	switch {
+	case r.Features.LogRequestErr && request.Error != *p.Code:
+		t.Fatalf("row: error %q, the refusal was %s", request.Error, *p.Code)
+	case !r.Features.LogRequestErr && request.Error != "":
+		t.Fatalf("row: error %q on a six-parameter api.log_request", request.Error)
+	case !r.Features.LogRequestErr:
+		t.Logf("api.log_request has six parameters here: the code %s is not journalled", *p.Code)
 	}
 }
 
@@ -348,7 +375,12 @@ func TestIntegration_RaisedRefusalIsJournalled(t *testing.T) {
 	if req.LogID == 0 {
 		t.Fatal("refusal not journalled")
 	}
-	if username, session, status, _ := journalled(t, r, code, req.LogID); username != nil || session != nil || status != p.Status {
-		t.Fatalf("row: user %v session %v status %d ≠ %d", username, session, status, p.Status)
+	username, session, request, _ := journalledRow(t, r, code, req.LogID)
+	if username != nil || session != nil || request.Status != p.Status {
+		t.Fatalf("row: user %v session %v status %d ≠ %d", username, session, request.Status, p.Status)
+	}
+	// the fresh transaction journals the raised code too (1.2.24)
+	if r.Features.LogRequestErr && (p.Code == nil || request.Error != *p.Code) {
+		t.Fatalf("row: error %q, the refusal was %v", request.Error, p.Code)
 	}
 }

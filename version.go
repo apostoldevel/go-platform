@@ -7,4 +7,4 @@ package platform
 // live in two repositories; this constant is the link, and the integration run
 // checks it against GO_TEST_DB_PLATFORM_VERSION (the submodule's VERSION file).
 // Bump it in the commit that re-runs the integration tests, never alone.
-const DBPlatform = "1.2.23"
+const DBPlatform = "1.2.24"

@@ -52,6 +52,7 @@ type Session struct {
 type Features struct {
 	AuthorizeLocal bool // api.authorize_local — session context set transaction-locally
 	LogRequest     bool // api.log_request(method, path, payload, status, runtime, request_id)
+	LogRequestErr  bool // … plus a seventh pError (db-platform 1.2.24): the catalogue code of a refusal, under _request.error
 	ParseMessage   bool // api.parse_message — the catalogue cut done by the database
 }
 
@@ -82,33 +83,45 @@ func (r *Request) status() int {
 	return r.Status
 }
 
-// Detect asks pg_proc which gateway-patch functions exist.
+// proc is one api.* function as pg_proc lists it: its name and how many
+// parameters it declares — the shape of a signature that grew (log_request:
+// six before 1.2.24, seven since) is read off the database, not off a flag.
+type proc struct {
+	name  string
+	nargs int
+}
+
+// Detect asks pg_proc which gateway-patch functions exist, and in which shape.
 func (r *Runner) Detect(ctx context.Context) error {
-	rows, err := r.Pool.Query(ctx, "SELECT proname FROM pg_proc WHERE pronamespace = 'api'::regnamespace AND proname IN ('authorize_local', 'log_request', 'parse_message')")
+	rows, err := r.Pool.Query(ctx, "SELECT proname, pronargs FROM pg_proc WHERE pronamespace = 'api'::regnamespace AND proname IN ('authorize_local', 'log_request', 'parse_message')")
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
-	var names []string
+	var procs []proc
 	for rows.Next() {
-		var n string
-		if err := rows.Scan(&n); err != nil {
+		var p proc
+		if err := rows.Scan(&p.name, &p.nargs); err != nil {
 			return err
 		}
-		names = append(names, n)
+		procs = append(procs, p)
 	}
-	r.Features = featuresFrom(names)
+	r.Features = featuresFrom(procs)
 	return rows.Err()
 }
 
-func featuresFrom(names []string) Features {
+func featuresFrom(procs []proc) Features {
 	var f Features
-	for _, n := range names {
-		switch n {
+	for _, p := range procs {
+		switch p.name {
 		case "authorize_local":
 			f.AuthorizeLocal = true
 		case "log_request":
 			f.LogRequest = true
+			// two overloads (an --update that added the parameter without the
+			// patch's DROP) make the six-argument call ambiguous and the
+			// seven-argument one exact: seven wins whatever the row order
+			f.LogRequestErr = f.LogRequestErr || p.nargs >= 7
 		case "parse_message":
 			f.ParseMessage = true
 		}
@@ -213,7 +226,7 @@ func (r *Runner) Do(ctx context.Context, s Session, req *Request, fn func(ctx co
 		return p
 	}
 	if journal {
-		if err := r.logRequest(ctx, tx, req, started, req.status()); err != nil {
+		if err := r.logRequest(ctx, tx, req, started, req.status(), ""); err != nil {
 			return r.explain(ctx, err)
 		}
 	}
@@ -232,8 +245,12 @@ func journalCtx(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 }
 
-// logRequest writes the db.api_log row for the request's outcome.
-func (r *Runner) logRequest(ctx context.Context, tx pgx.Tx, req *Request, started time.Time, status int) error {
+// logRequest writes the db.api_log row for the request's outcome; code is
+// the catalogue code of a refusal (ERR-GGG-CCC), empty on success or when
+// the refusal has none (a module-side problem: not-found, validation) —
+// written as pError where the database takes it, so that a 4xx line says
+// what was refused, not only that it was.
+func (r *Runner) logRequest(ctx context.Context, tx pgx.Tx, req *Request, started time.Time, status int, code string) error {
 	var payload any
 	if len(req.Payload) > 0 {
 		payload = req.Payload
@@ -242,6 +259,13 @@ func (r *Runner) logRequest(ctx context.Context, tx pgx.Tx, req *Request, starte
 	if req.RequestID != "" && isUUID(req.RequestID) {
 		rid = req.RequestID
 	}
+	if r.Features.LogRequestErr {
+		var errCode any
+		if code != "" {
+			errCode = code
+		}
+		return tx.QueryRow(ctx, "SELECT api.log_request($1, $2, $3::jsonb, $4, $5::interval, $6::uuid, $7::text)", req.Method, req.Path, payload, status, time.Since(started), rid, errCode).Scan(&req.LogID)
+	}
 	return tx.QueryRow(ctx, "SELECT api.log_request($1, $2, $3::jsonb, $4, $5::interval, $6::uuid)", req.Method, req.Path, payload, status, time.Since(started), rid).Scan(&req.LogID)
 }
 
@@ -249,12 +273,15 @@ func (r *Runner) logRequest(ctx context.Context, tx pgx.Tx, req *Request, starte
 // journalCtx; the answer to the client is the problem either way — an audit
 // that cannot be written is logged, not turned into a second error.
 func (r *Runner) journalRefusal(ctx context.Context, tx pgx.Tx, req *Request, started time.Time, p error) {
-	status := 500
+	status, code := 500, ""
 	var pr *problem.Problem
 	if errors.As(p, &pr) {
 		status = pr.Status
+		if pr.Code != nil {
+			code = *pr.Code
+		}
 	}
-	err := r.logRequest(ctx, tx, req, started, status)
+	err := r.logRequest(ctx, tx, req, started, status, code)
 	if err == nil {
 		err = tx.Commit(ctx)
 	}
