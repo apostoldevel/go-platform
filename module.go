@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/netip"
 	"net/url"
@@ -52,6 +53,9 @@ type Config struct {
 	// never asks the database per request: a refusal before the token is
 	// checked must cost nothing.
 	Catalogue problem.Catalogue
+	// Logger receives the exact reason a token was refused (the answer
+	// does not say it); nil — not logged.
+	Logger *slog.Logger
 	// TrustedProxies are the proxies whose X-Forwarded-For is believed
 	// (ParseTrustedProxies reads a list). Nil: only the peer is — the client
 	// is the last element, the one the peer appended (the gateway sends
@@ -143,14 +147,20 @@ func (h *host) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	claims, err := h.cfg.Keys.Verify(tok, h.cfg.Now())
 	if err != nil {
-		code := problem.CodeLoginFailed // malformed, not our audience, not our issuer
-		switch {
-		case errors.Is(err, jwt.ErrSignature):
-			code = problem.CodeSignature
-		case errors.Is(err, jwt.ErrExpired):
-			code = problem.CodeTokenExpired
+		// Verify checks the audience before the signature: a code or a detail
+		// that told "unknown audience" from "bad signature" would let an
+		// unsigned token enumerate client ids. Every failure that can happen
+		// before the signature holds is one answer, as the gateway gives it;
+		// the reason goes to the process log. Expiry is checked only after the
+		// signature, so saying it tells a stranger nothing.
+		if h.cfg.Logger != nil {
+			h.cfg.Logger.Debug("token refused", "err", err, "request_id", r.Header.Get("X-Request-Id"))
 		}
-		h.unauthorized(code, err.Error()).Write(w, r)
+		if errors.Is(err, jwt.ErrExpired) {
+			h.unauthorized(problem.CodeTokenExpired, "The access token has expired.").Write(w, r)
+			return
+		}
+		h.unauthorized(problem.CodeLoginFailed, "The access token could not be verified.").Write(w, r)
 		return
 	}
 	sess := pgtx.Session{Code: claims.Sub, Agent: r.Header.Get("User-Agent"), Host: clientAddr(r, h.cfg.TrustedProxies)}

@@ -68,7 +68,7 @@ type Runner struct {
 }
 
 // titleCodes are the codes Detect reads the catalogue messages of.
-var titleCodes = []string{problem.CodeLoginFailed, problem.CodeSignature, problem.CodeTokenExpired}
+var titleCodes = []string{problem.CodeLoginFailed, problem.CodeTokenExpired}
 
 // Title implements problem.Catalogue: the catalogue message read at Detect;
 // fallback for a code it does not hold.

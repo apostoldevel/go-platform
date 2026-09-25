@@ -41,9 +41,8 @@ func (p *Problem) Error() string {
 // Catalogue codes of the refusals the platform makes itself, before or
 // around the database (db-platform error module).
 const (
-	CodeLoginFailed  = "ERR-401-001" // no credentials, a token not for us (malformed, audience, issuer), a session the database does not know
-	CodeSignature    = "ERR-401-007" // a token for us whose signature does not verify
-	CodeTokenExpired = "ERR-401-008" // a token whose time is over
+	CodeLoginFailed  = "ERR-401-001" // no credentials, a token that does not verify, a session the database does not know
+	CodeTokenExpired = "ERR-401-008" // a verified token whose time is over
 )
 
 // Catalogue gives the catalogue message of a code, to title a problem the

@@ -2,6 +2,7 @@ package platform_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -111,20 +112,25 @@ func (c titles) Title(code, fallback string) string {
 }
 
 func TestUnauthorized_401_BeforeAnyRoute(t *testing.T) {
-	cat := titles{"ERR-401-001": "Login failed", "ERR-401-007": "Signature is incorrect or missing", "ERR-401-008": "Token not FOUND or has expired"}
+	cat := titles{"ERR-401-001": "Login failed", "ERR-401-008": "Token not FOUND or has expired"}
 	withCat := host(t, platform.Config{Catalogue: cat}, fake{name: "x", pref: []string{"/api/v2/x"}})
 	bare := host(t, platform.Config{}, fake{name: "x", pref: []string{"/api/v2/x"}})
+	unsigned := func(aud string) string { // a token nobody signed: header.body.garbage
+		parts := strings.Split(jwt.Sign(jwt.Claims{Iss: "accounts.test", Aud: aud, Sub: "s", Exp: time.Now().Add(time.Hour).Unix()}, "HS256", []byte("guess")), ".")
+		return parts[0] + "." + parts[1] + ".AAAA"
+	}
+	const noToken, notVerified, expired = "Bearer token required", "The access token could not be verified.", "The access token has expired."
 	for name, c := range map[string]struct {
-		hdr  map[string]string
-		code string
+		hdr          map[string]string
+		code, detail string
 	}{
-		"no header":      {map[string]string{}, "ERR-401-001"},
-		"not bearer":     {map[string]string{"Authorization": "Basic abc"}, "ERR-401-001"},
-		"malformed":      {map[string]string{"Authorization": "Bearer abc.def"}, "ERR-401-001"},
-		"bad signature":  {map[string]string{"Authorization": "Bearer " + token("s") + "x"}, "ERR-401-007"},
-		"unknown aud":    {map[string]string{"Authorization": "Bearer " + jwt.Sign(jwt.Claims{Iss: "accounts.test", Aud: "other", Sub: "s", Exp: time.Now().Add(time.Hour).Unix()}, "HS256", []byte("s"))}, "ERR-401-001"},
-		"foreign issuer": {map[string]string{"Authorization": "Bearer " + jwt.Sign(jwt.Claims{Iss: "evil", Aud: "web-test", Sub: "s", Exp: time.Now().Add(time.Hour).Unix()}, "HS256", []byte("s"))}, "ERR-401-001"},
-		"expired":        {map[string]string{"Authorization": "Bearer " + jwt.Sign(jwt.Claims{Iss: "accounts.test", Aud: "web-test", Sub: "s", Exp: time.Now().Add(-time.Minute).Unix()}, "HS256", []byte("s"))}, "ERR-401-008"},
+		"no header":      {map[string]string{}, "ERR-401-001", noToken},
+		"not bearer":     {map[string]string{"Authorization": "Basic abc"}, "ERR-401-001", noToken},
+		"malformed":      {map[string]string{"Authorization": "Bearer abc.def"}, "ERR-401-001", notVerified},
+		"bad signature":  {map[string]string{"Authorization": "Bearer " + token("s") + "x"}, "ERR-401-001", notVerified},
+		"unknown aud":    {map[string]string{"Authorization": "Bearer " + jwt.Sign(jwt.Claims{Iss: "accounts.test", Aud: "other", Sub: "s", Exp: time.Now().Add(time.Hour).Unix()}, "HS256", []byte("s"))}, "ERR-401-001", notVerified},
+		"foreign issuer": {map[string]string{"Authorization": "Bearer " + jwt.Sign(jwt.Claims{Iss: "evil", Aud: "web-test", Sub: "s", Exp: time.Now().Add(time.Hour).Unix()}, "HS256", []byte("s"))}, "ERR-401-001", notVerified},
+		"expired":        {map[string]string{"Authorization": "Bearer " + jwt.Sign(jwt.Claims{Iss: "accounts.test", Aud: "web-test", Sub: "s", Exp: time.Now().Add(-time.Minute).Unix()}, "HS256", []byte("s"))}, "ERR-401-008", expired},
 	} {
 		c.hdr["X-Request-Id"] = "r1"
 		rec := do(withCat, "GET", "/api/v2/x", c.hdr)
@@ -136,13 +142,22 @@ func TestUnauthorized_401_BeforeAnyRoute(t *testing.T) {
 			t.Fatalf("%s: %v", name, p)
 		}
 		// the machine key is the catalogue code; the title is its message
-		if p["code"] != c.code || p["title"] != cat[c.code] || p["detail"] == "" {
-			t.Fatalf("%s: code %v title %v detail %v, want %s %q", name, p["code"], p["title"], p["detail"], c.code, cat[c.code])
+		if p["code"] != c.code || p["title"] != cat[c.code] || p["detail"] != c.detail {
+			t.Fatalf("%s: code %v title %v detail %v, want %s %q %q", name, p["code"], p["title"], p["detail"], c.code, cat[c.code], c.detail)
 		}
 		// no catalogue at hand: the code is sent all the same
 		if p := problemOf(t, do(bare, "GET", "/api/v2/x", c.hdr)); p["code"] != c.code || p["title"] != "Unauthorized" {
 			t.Fatalf("%s without catalogue: %v", name, p)
 		}
+	}
+	// an unsigned token must not tell a known audience from an unknown one
+	// (Verify checks aud before the signature): same status, code, detail
+	known := problemOf(t, do(withCat, "GET", "/api/v2/x", map[string]string{"Authorization": "Bearer " + unsigned("web-test")}))
+	unknown := problemOf(t, do(withCat, "GET", "/api/v2/x", map[string]string{"Authorization": "Bearer " + unsigned("no-such-client")}))
+	delete(known, "request_id")
+	delete(unknown, "request_id")
+	if fmt.Sprint(known) != fmt.Sprint(unknown) {
+		t.Fatalf("audience oracle: known %v, unknown %v", known, unknown)
 	}
 }
 
