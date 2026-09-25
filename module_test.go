@@ -126,6 +126,7 @@ func TestUnauthorized_401_BeforeAnyRoute(t *testing.T) {
 	}{
 		"no header":      {map[string]string{}, "ERR-401-001", noToken},
 		"not bearer":     {map[string]string{"Authorization": "Basic abc"}, "ERR-401-001", noToken},
+		"empty bearer":   {map[string]string{"Authorization": "Bearer "}, "ERR-401-001", noToken},
 		"malformed":      {map[string]string{"Authorization": "Bearer abc.def"}, "ERR-401-001", notVerified},
 		"bad signature":  {map[string]string{"Authorization": "Bearer " + token("s") + "x"}, "ERR-401-001", notVerified},
 		"unknown aud":    {map[string]string{"Authorization": "Bearer " + jwt.Sign(jwt.Claims{Iss: "accounts.test", Aud: "other", Sub: "s", Exp: time.Now().Add(time.Hour).Unix()}, "HS256", []byte("s"))}, "ERR-401-001", notVerified},
@@ -145,6 +146,15 @@ func TestUnauthorized_401_BeforeAnyRoute(t *testing.T) {
 		if p["code"] != c.code || p["title"] != cat[c.code] || p["detail"] != c.detail {
 			t.Fatalf("%s: code %v title %v detail %v, want %s %q %q", name, p["code"], p["title"], p["detail"], c.code, cat[c.code], c.detail)
 		}
+		// RFC 6750 §3: no bearer at all — the bare scheme; a bearer refused —
+		// invalid_token, the detail as the description
+		want := `Bearer error="invalid_token", error_description="` + c.detail + `"`
+		if c.detail == noToken {
+			want = "Bearer"
+		}
+		if got := rec.Header().Values("WWW-Authenticate"); len(got) != 1 || got[0] != want {
+			t.Fatalf("%s: WWW-Authenticate %q, want %q", name, got, want)
+		}
 		// no catalogue at hand: the code is sent all the same
 		if p := problemOf(t, do(bare, "GET", "/api/v2/x", c.hdr)); p["code"] != c.code || p["title"] != "Unauthorized" {
 			t.Fatalf("%s without catalogue: %v", name, p)
@@ -152,8 +162,12 @@ func TestUnauthorized_401_BeforeAnyRoute(t *testing.T) {
 	}
 	// an unsigned token must not tell a known audience from an unknown one
 	// (Verify checks aud before the signature): same status, code, detail
-	known := problemOf(t, do(withCat, "GET", "/api/v2/x", map[string]string{"Authorization": "Bearer " + unsigned("web-test")}))
-	unknown := problemOf(t, do(withCat, "GET", "/api/v2/x", map[string]string{"Authorization": "Bearer " + unsigned("no-such-client")}))
+	knownRec := do(withCat, "GET", "/api/v2/x", map[string]string{"Authorization": "Bearer " + unsigned("web-test")})
+	unknownRec := do(withCat, "GET", "/api/v2/x", map[string]string{"Authorization": "Bearer " + unsigned("no-such-client")})
+	if k, u := knownRec.Header().Get("WWW-Authenticate"), unknownRec.Header().Get("WWW-Authenticate"); k != u {
+		t.Fatalf("audience oracle in the challenge: known %q, unknown %q", k, u)
+	}
+	known, unknown := problemOf(t, knownRec), problemOf(t, unknownRec)
 	delete(known, "request_id")
 	delete(unknown, "request_id")
 	if fmt.Sprint(known) != fmt.Sprint(unknown) {

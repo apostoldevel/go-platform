@@ -100,3 +100,60 @@ func TestUnauthorized_NilSafeTitledFromCatalogue(t *testing.T) {
 		t.Fatalf("code the catalogue lacks: %+v", p)
 	}
 }
+
+// RFC 6750 §3: every 401 of a bearer-protected resource says how to present
+// credentials. No credentials at all — the bare scheme, no error code
+// (§3.1: SHOULD NOT); anything else — invalid_token, with the detail as the
+// description only where §3 lets it stand (printable ASCII, no `"` or `\`).
+func TestWrite_401CarriesBearerChallenge(t *testing.T) {
+	for name, c := range map[string]struct {
+		p    *Problem
+		want string
+	}{
+		"not verified":   {Unauthorized(nil, "ERR-401-001", "The access token could not be verified."), `Bearer error="invalid_token", error_description="The access token could not be verified."`},
+		"expired":        {Unauthorized(nil, "ERR-401-008", "The access token has expired."), `Bearer error="invalid_token", error_description="The access token has expired."`},
+		"no credentials": {Unauthorized(nil, "ERR-401-001", "Bearer token required").NoCredentials(), `Bearer`},
+		"catalogue 401":  {FromCode("ERR-401-009", "Доступ запрещён", "Вход с этого адреса запрещён"), `Bearer error="invalid_token"`},
+		"quote":          {Unauthorized(nil, "ERR-401-001", `say "no"`), `Bearer error="invalid_token"`},
+		"backslash":      {Unauthorized(nil, "ERR-401-001", `a\b`), `Bearer error="invalid_token"`},
+		"line break":     {Unauthorized(nil, "ERR-401-001", "a\r\nX-Evil: 1"), `Bearer error="invalid_token"`},
+		"no detail":      {Unauthorized(nil, "ERR-401-001", ""), `Bearer error="invalid_token"`},
+	} {
+		rec := httptest.NewRecorder()
+		c.p.Write(rec, httptest.NewRequest("GET", "/api/v2/x", nil))
+		if got := rec.Header().Values("WWW-Authenticate"); len(got) != 1 || got[0] != c.want {
+			t.Errorf("%s: %q, want %q", name, got, c.want)
+		}
+	}
+	for _, p := range []*Problem{New(403, "forbidden", "Forbidden", ""), New(404, "not-found", "Not found", ""), FromCode("ERR-400-032", "t", "d")} {
+		rec := httptest.NewRecorder()
+		p.Write(rec, httptest.NewRequest("GET", "/api/v2/x", nil))
+		if got := rec.Header().Get("WWW-Authenticate"); got != "" {
+			t.Errorf("%d: challenge on a non-401: %q", p.Status, got)
+		}
+	}
+	// the challenge is not part of the body
+	rec := httptest.NewRecorder()
+	Unauthorized(nil, "ERR-401-001", "d").NoCredentials().Write(rec, httptest.NewRequest("GET", "/api/v2/x", nil))
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	for k := range got {
+		switch k {
+		case "type", "title", "status", "detail", "instance", "code":
+		default:
+			t.Fatalf("body key %q: %v", k, got)
+		}
+	}
+}
+
+func TestNoCredentials_DoesNotChangeTheReceiver(t *testing.T) {
+	base := Unauthorized(nil, "ERR-401-001", "d")
+	_ = base.NoCredentials()
+	rec := httptest.NewRecorder()
+	base.Write(rec, httptest.NewRequest("GET", "/", nil))
+	if got := rec.Header().Get("WWW-Authenticate"); got != `Bearer error="invalid_token", error_description="d"` {
+		t.Fatalf("%q", got)
+	}
+}

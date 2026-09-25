@@ -142,7 +142,7 @@ func (h *host) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if tok == "" || tok == r.Header.Get("Authorization") {
-		h.unauthorized(problem.CodeLoginFailed, "Bearer token required").Write(w, r)
+		h.unauthorized(problem.CodeLoginFailed, "Bearer token required").NoCredentials().Write(w, r)
 		return
 	}
 	claims, err := h.cfg.Keys.Verify(tok, h.cfg.Now())

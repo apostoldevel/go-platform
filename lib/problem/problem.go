@@ -10,6 +10,12 @@
 // catalogue code keeps its slug in `type` (the class of the problem, stable
 // for readers that branch on it) and carries the code in `code` — `code` is
 // the machine key in every case, `null` only where the catalogue has none.
+//
+// Every 401 carries `WWW-Authenticate` (RFC 6750 §3): the bare `Bearer` when
+// the request had no bearer at all (NoCredentials), `Bearer
+// error="invalid_token"` for every other 401 — a token refused, a session the
+// database does not know or refuses — with the detail as `error_description`
+// where §3 lets it stand.
 package problem
 
 import (
@@ -28,6 +34,8 @@ type Problem struct {
 	Instance  string  `json:"instance,omitempty"`
 	RequestID string  `json:"request_id,omitempty"`
 	Code      *string `json:"code"` // ERR-GGG-CCC or null
+
+	noCredentials bool // a 401 to a request with no bearer: challenge without an error code
 }
 
 // Error implements error.
@@ -91,6 +99,42 @@ func (p *Problem) WithCode(code string) *Problem {
 	return &out
 }
 
+// NoCredentials returns a copy of the 401 marked as an answer to a request
+// that presented no bearer at all: RFC 6750 §3.1 — the challenge then names
+// the scheme and SHOULD NOT carry an error code.
+func (p *Problem) NoCredentials() *Problem {
+	out := *p
+	out.noCredentials = true
+	return &out
+}
+
+// challenge is the WWW-Authenticate value of a 401 (RFC 6750 §3).
+func (p *Problem) challenge() string {
+	if p.noCredentials {
+		return "Bearer"
+	}
+	c := `Bearer error="invalid_token"`
+	if describable(p.Detail) {
+		c += `, error_description="` + p.Detail + `"`
+	}
+	return c
+}
+
+// describable: RFC 6750 §3 allows error_description only in %x20-21 /
+// %x23-5B / %x5D-7E. A detail outside it (the catalogue's localized text, a
+// quote, a line break) is left out rather than mangled — the body carries it.
+func describable(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c < 0x20 || c > 0x7e || c == '"' || c == '\\' {
+			return false
+		}
+	}
+	return true
+}
+
 // FromCode builds a catalogue problem for ERR-GGG-CCC.
 func FromCode(code, title, detail string) *Problem {
 	status := 400
@@ -114,6 +158,9 @@ func (p *Problem) Write(w http.ResponseWriter, r *http.Request) {
 		out.RequestID = r.Header.Get("X-Request-Id")
 	}
 	w.Header().Set("Content-Type", "application/problem+json")
+	if out.Status == http.StatusUnauthorized {
+		w.Header().Set("WWW-Authenticate", out.challenge())
+	}
 	if out.RequestID != "" {
 		w.Header().Set("X-Request-Id", out.RequestID)
 	}

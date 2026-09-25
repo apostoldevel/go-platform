@@ -6,7 +6,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http/httptest"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -93,6 +95,12 @@ func TestIntegration_BadSessionIs401(t *testing.T) {
 	// the slug type stays for readers that branch on it
 	if p.Code == nil || *p.Code != problem.CodeLoginFailed || p.Type != "urn:apostol:error:unauthorized" {
 		t.Fatalf("code %v type %s", p.Code, p.Type)
+	}
+	// a bearer was presented and refused: RFC 6750 §3 invalid_token (T282)
+	rec := httptest.NewRecorder()
+	p.Write(rec, httptest.NewRequest("GET", "/api/v2/x", nil))
+	if got := rec.Header().Get("WWW-Authenticate"); !strings.HasPrefix(got, `Bearer error="invalid_token"`) {
+		t.Fatalf("WWW-Authenticate %q", got)
 	}
 }
 
