@@ -20,20 +20,37 @@ func live(t *testing.T) *resttest.Live {
 // from /changed as the entity's own row; /since answers an array.
 func TestIntegration_ListGetSinceChanged(t *testing.T) {
 	l := live(t)
-	p := resttest.ListOf(t, l.Call("GET", "/api/v2/notifications?sort=-datetime&resttest.Page[limit]=20", ""), "notifications")
-	// the newest notification whose object still exists (the newest of all may be a drop)
-	var id, object, entity string
+	p := resttest.ListOf(t, l.Call("GET", "/api/v2/notifications?sort=-datetime&page[limit]=100", ""), "notifications")
+	// the newest notification whose object the caller reads through its
+	// entity's own api.get_<x> — what /changed answers with. api.get_object is
+	// not that test: it sees a document outside the caller's area tree (a
+	// company's own area, say) that api.get_<x> rightly hides, and /changed
+	// then rightly leaves out; the newest of all may also be a drop. A
+	// passed-over object that api.get_object still sees is kept: /changed
+	// must leave it out. A hundred, not twenty: a run that creates companies
+	// fills the top of the journal with objects the caller does not read.
+	var id, object, entity, hidden string
 	for _, n := range p.Items {
 		object, _ = n["object"].(string)
-		if !resttest.SameJSON(l.Direct(t, "SELECT to_json(count(*) > 0) FROM api.get_object($1::uuid)", object), []byte("true")) {
+		entity, _ = n["entitycode"].(string)
+		fn, ok := getFnOf(entity)
+		if !ok || !resttest.SameJSON(l.Direct(t, "SELECT to_json(count(*) > 0) FROM "+fn+"($1::uuid) t WHERE t.id IS NOT NULL", object), []byte("true")) {
+			if hidden == "" && resttest.SameJSON(l.Direct(t, "SELECT to_json(count(*) > 0) FROM api.get_object($1::uuid)", object), []byte("true")) {
+				hidden = object
+			}
 			continue
 		}
 		id, _ = n["id"].(string)
-		entity, _ = n["entitycode"].(string)
 		break
 	}
+	if hidden != "" {
+		// an object the caller may not read through its entity is left out, as in v1
+		if rec := l.Call("GET", "/api/v2/notifications/changed?objects="+hidden+"&from=2000-01-01T00:00:00Z", ""); rec.Code != 200 || rec.Body.String() != "[]" {
+			t.Fatalf("changed shows an object api.get_<x> hides (%s): %d %s", hidden, rec.Code, rec.Body)
+		}
+	}
 	if id == "" {
-		t.Skip("none of the 20 newest notifications points at a living object")
+		t.Skipf("none of the 100 newest notifications points at an object the caller reads (hidden checked: %q)", hidden)
 	}
 	rec := l.Call("GET", "/api/v2/notifications/"+id, "")
 	if rec.Code != 200 || !resttest.SameJSON(rec.Body.Bytes(), l.Direct(t, "SELECT row_to_json(t) FROM api.get_notification($1::uuid) t", id)) {
