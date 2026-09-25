@@ -89,6 +89,29 @@ func TestIntegration_BadSessionIs401(t *testing.T) {
 	if !errors.As(err, &p) || p.Status != 401 {
 		t.Fatalf("got %v", err)
 	}
+	// the refusal v1 names ERR-401-001 (LoginFailed) is named the same here;
+	// the slug type stays for readers that branch on it
+	if p.Code == nil || *p.Code != problem.CodeLoginFailed || p.Type != "urn:apostol:error:unauthorized" {
+		t.Fatalf("code %v type %s", p.Code, p.Type)
+	}
+}
+
+// Detect reads the catalogue messages of the platform's own refusal codes:
+// the 401 of an unknown session is titled by the catalogue, not by Go.
+func TestIntegration_DetectReadsCatalogueTitles(t *testing.T) {
+	r, _ := patched(t)
+	var want string
+	if err := r.Pool.QueryRow(context.Background(), "SELECT message FROM api.error_catalog WHERE code = $1", problem.CodeLoginFailed).Scan(&want); err != nil || want == "" {
+		t.Fatalf("catalogue has no %s: %v", problem.CodeLoginFailed, err)
+	}
+	if got := r.Title(problem.CodeLoginFailed, "fallback"); got != want {
+		t.Fatalf("title %q, catalogue %q", got, want)
+	}
+	err := r.Do(context.Background(), pgtx.Session{Code: "0000000000000000000000000000000000000000"}, nil, func(ctx context.Context, tx pgx.Tx) error { return nil })
+	var p *problem.Problem
+	if !errors.As(err, &p) || p.Title != want {
+		t.Fatalf("got %+v, want title %q", p, want)
+	}
 }
 
 func TestIntegration_CatalogueErrorBecomesProblem(t *testing.T) {
@@ -332,8 +355,13 @@ func TestIntegration_RefusedSessionIsJournalledWithoutOne(t *testing.T) {
 	if req.LogID == 0 {
 		t.Fatal("refusal not journalled")
 	}
-	if username, session, status, _ := journalled(t, r, mint(t), req.LogID); username != nil || session != nil || status != 401 {
-		t.Fatalf("row: user %v session %v status %d", username, session, status)
+	username, session, request, _ := journalledRow(t, r, mint(t), req.LogID)
+	if username != nil || session != nil || request.Status != 401 {
+		t.Fatalf("row: user %v session %v status %d", username, session, request.Status)
+	}
+	// _request.error carries the code the client got
+	if r.Features.LogRequestErr && request.Error != problem.CodeLoginFailed {
+		t.Fatalf("_request.error %q, the client got %s", request.Error, problem.CodeLoginFailed)
 	}
 }
 

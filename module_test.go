@@ -100,21 +100,48 @@ func TestNew_NoModulesIsError(t *testing.T) {
 	}
 }
 
+// titles is a catalogue stand-in: code → message.
+type titles map[string]string
+
+func (c titles) Title(code, fallback string) string {
+	if t, ok := c[code]; ok {
+		return t
+	}
+	return fallback
+}
+
 func TestUnauthorized_401_BeforeAnyRoute(t *testing.T) {
-	h := host(t, platform.Config{}, fake{name: "x", pref: []string{"/api/v2/x"}})
-	for name, hdr := range map[string]map[string]string{
-		"no header":     {},
-		"not bearer":    {"Authorization": "Basic abc"},
-		"bad signature": {"Authorization": "Bearer " + token("s") + "x"},
-		"expired":       {"Authorization": "Bearer " + jwt.Sign(jwt.Claims{Iss: "accounts.test", Aud: "web-test", Sub: "s", Exp: time.Now().Add(-time.Minute).Unix()}, "HS256", []byte("s"))},
+	cat := titles{"ERR-401-001": "Login failed", "ERR-401-007": "Signature is incorrect or missing", "ERR-401-008": "Token not FOUND or has expired"}
+	withCat := host(t, platform.Config{Catalogue: cat}, fake{name: "x", pref: []string{"/api/v2/x"}})
+	bare := host(t, platform.Config{}, fake{name: "x", pref: []string{"/api/v2/x"}})
+	for name, c := range map[string]struct {
+		hdr  map[string]string
+		code string
+	}{
+		"no header":      {map[string]string{}, "ERR-401-001"},
+		"not bearer":     {map[string]string{"Authorization": "Basic abc"}, "ERR-401-001"},
+		"malformed":      {map[string]string{"Authorization": "Bearer abc.def"}, "ERR-401-001"},
+		"bad signature":  {map[string]string{"Authorization": "Bearer " + token("s") + "x"}, "ERR-401-007"},
+		"unknown aud":    {map[string]string{"Authorization": "Bearer " + jwt.Sign(jwt.Claims{Iss: "accounts.test", Aud: "other", Sub: "s", Exp: time.Now().Add(time.Hour).Unix()}, "HS256", []byte("s"))}, "ERR-401-001"},
+		"foreign issuer": {map[string]string{"Authorization": "Bearer " + jwt.Sign(jwt.Claims{Iss: "evil", Aud: "web-test", Sub: "s", Exp: time.Now().Add(time.Hour).Unix()}, "HS256", []byte("s"))}, "ERR-401-001"},
+		"expired":        {map[string]string{"Authorization": "Bearer " + jwt.Sign(jwt.Claims{Iss: "accounts.test", Aud: "web-test", Sub: "s", Exp: time.Now().Add(-time.Minute).Unix()}, "HS256", []byte("s"))}, "ERR-401-008"},
 	} {
-		hdr["X-Request-Id"] = "r1"
-		rec := do(h, "GET", "/api/v2/x", hdr)
+		c.hdr["X-Request-Id"] = "r1"
+		rec := do(withCat, "GET", "/api/v2/x", c.hdr)
 		if rec.Code != 401 {
 			t.Fatalf("%s: %d %s", name, rec.Code, rec.Body)
 		}
-		if p := problemOf(t, rec); p["type"] != "urn:apostol:error:unauthorized" || p["request_id"] != "r1" || rec.Header().Get("X-Request-Id") != "r1" {
+		p := problemOf(t, rec)
+		if p["type"] != "urn:apostol:error:unauthorized" || p["request_id"] != "r1" || rec.Header().Get("X-Request-Id") != "r1" {
 			t.Fatalf("%s: %v", name, p)
+		}
+		// the machine key is the catalogue code; the title is its message
+		if p["code"] != c.code || p["title"] != cat[c.code] || p["detail"] == "" {
+			t.Fatalf("%s: code %v title %v detail %v, want %s %q", name, p["code"], p["title"], p["detail"], c.code, cat[c.code])
+		}
+		// no catalogue at hand: the code is sent all the same
+		if p := problemOf(t, do(bare, "GET", "/api/v2/x", c.hdr)); p["code"] != c.code || p["title"] != "Unauthorized" {
+			t.Fatalf("%s without catalogue: %v", name, p)
 		}
 	}
 }

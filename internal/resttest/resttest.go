@@ -73,7 +73,7 @@ func Start(t *testing.T, agent string, mod func(runner *pgtx.Runner) platform.Mo
 	if err := runner.Detect(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	h, err := platform.New(platform.Config{Keys: Keys}, mod(runner))
+	h, err := platform.New(platform.Config{Keys: Keys, Catalogue: runner}, mod(runner))
 	if err != nil {
 		t.Fatal(err)
 	}

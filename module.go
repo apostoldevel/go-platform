@@ -12,6 +12,7 @@ package platform
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/netip"
@@ -39,12 +40,18 @@ type Module interface {
 
 // Config is what the host needs beyond the modules: the JWT keys of the
 // OAuth2 providers (the signature is verified here, before any route — the
-// database trusts the session code), the clock for the verification, and an
-// optional in-flight counter the gateway client reports.
+// database trusts the session code), the clock for the verification, an
+// optional in-flight counter the gateway client reports, and the catalogue
+// titles of its refusals.
 type Config struct {
 	Keys     jwt.Keyring
 	Now      func() time.Time
 	InFlight interface{ Add(int32) int32 }
+	// Catalogue titles the host's own 401 with the catalogue message of its
+	// code (pgtx.Runner reads them at Detect); nil — "Unauthorized". The host
+	// never asks the database per request: a refusal before the token is
+	// checked must cost nothing.
+	Catalogue problem.Catalogue
 	// TrustedProxies are the proxies whose X-Forwarded-For is believed
 	// (ParseTrustedProxies reads a list). Nil: only the peer is — the client
 	// is the last element, the one the peer appended (the gateway sends
@@ -131,12 +138,19 @@ func (h *host) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if tok == "" || tok == r.Header.Get("Authorization") {
-		problem.New(401, "unauthorized", "Unauthorized", "Bearer token required").Write(w, r)
+		h.unauthorized(problem.CodeLoginFailed, "Bearer token required").Write(w, r)
 		return
 	}
 	claims, err := h.cfg.Keys.Verify(tok, h.cfg.Now())
 	if err != nil {
-		problem.New(401, "unauthorized", "Unauthorized", err.Error()).Write(w, r)
+		code := problem.CodeLoginFailed // malformed, not our audience, not our issuer
+		switch {
+		case errors.Is(err, jwt.ErrSignature):
+			code = problem.CodeSignature
+		case errors.Is(err, jwt.ErrExpired):
+			code = problem.CodeTokenExpired
+		}
+		h.unauthorized(code, err.Error()).Write(w, r)
 		return
 	}
 	sess := pgtx.Session{Code: claims.Sub, Agent: r.Header.Get("User-Agent"), Host: clientAddr(r, h.cfg.TrustedProxies)}
@@ -174,6 +188,12 @@ func (h *host) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.mux.ServeHTTP(w, r)
+}
+
+// unauthorized is the host's 401, titled from the catalogue the process
+// read at start.
+func (h *host) unauthorized(code, detail string) *problem.Problem {
+	return problem.Unauthorized(h.cfg.Catalogue, code, detail)
 }
 
 // canonical mirrors ServeMux's cleanPath: what the mux would redirect, it

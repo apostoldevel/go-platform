@@ -68,3 +68,35 @@ func TestError_Unwrap(t *testing.T) {
 		t.Fatal("Problem must be an error")
 	}
 }
+
+func TestWithCode_KeepsSlugSetsCode(t *testing.T) {
+	base := New(401, "unauthorized", "Login failed", "Bearer token required")
+	p := base.WithCode("ERR-401-001")
+	if p.Type != "urn:apostol:error:unauthorized" || p.Status != 401 || p.Code == nil || *p.Code != "ERR-401-001" || p.Title != "Login failed" {
+		t.Fatalf("%+v", p)
+	}
+	if base.Code != nil {
+		t.Fatal("WithCode must not change the receiver")
+	}
+}
+
+type oneTitle struct{}
+
+func (oneTitle) Title(code, fallback string) string {
+	if code == "ERR-401-001" {
+		return "Login failed"
+	}
+	return fallback
+}
+
+func TestUnauthorized_NilSafeTitledFromCatalogue(t *testing.T) {
+	if p := Unauthorized(nil, "ERR-401-008", "jwt: expired"); p.Title != "Unauthorized" || p.Code == nil || *p.Code != "ERR-401-008" || p.Status != 401 || p.Type != "urn:apostol:error:unauthorized" {
+		t.Fatalf("nil catalogue: %+v", p)
+	}
+	if p := Unauthorized(oneTitle{}, "ERR-401-001", "d"); p.Title != "Login failed" || p.Detail != "d" {
+		t.Fatalf("%+v", p)
+	}
+	if p := Unauthorized(oneTitle{}, "ERR-401-007", "d"); p.Title != "Unauthorized" {
+		t.Fatalf("code the catalogue lacks: %+v", p)
+	}
+}

@@ -61,6 +61,28 @@ type Runner struct {
 	Pool     *pgxpool.Pool
 	Features Features
 	Logger   *slog.Logger
+	// titles: the catalogue message of each code the platform refuses with
+	// itself (problem.Code*), read once at Detect — a refusal never asks the
+	// database for its own wording
+	titles map[string]string
+}
+
+// titleCodes are the codes Detect reads the catalogue messages of.
+var titleCodes = []string{problem.CodeLoginFailed, problem.CodeSignature, problem.CodeTokenExpired}
+
+// Title implements problem.Catalogue: the catalogue message read at Detect;
+// fallback for a code it does not hold.
+func (r *Runner) Title(code, fallback string) string {
+	if t := r.titles[code]; t != "" {
+		return t
+	}
+	return fallback
+}
+
+// usableTitle: a catalogue message that is a format template ("… %s …") is
+// no title — it would reach the client with the verb in it.
+func usableTitle(msg string) bool {
+	return msg != "" && !strings.Contains(msg, "%")
 }
 
 // Request describes the HTTP request for api.log_request. The handler may
@@ -106,8 +128,49 @@ func (r *Runner) Detect(ctx context.Context) error {
 		}
 		procs = append(procs, p)
 	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
 	r.Features = featuresFrom(procs)
-	return rows.Err()
+	r.loadTitles(ctx)
+	return nil
+}
+
+// loadTitles reads the catalogue messages of titleCodes in the locale a
+// session-less connection gets (the deployment's default), through the same
+// SECURITY DEFINER function explain uses. Detect runs once, before the
+// process serves, so the map is never written while Title reads it. A
+// database that cannot answer leaves the fallback titles — the codes are
+// sent either way — and says why in the log.
+func (r *Runner) loadTitles(ctx context.Context) {
+	warn := func(err error) {
+		if r.Logger != nil {
+			r.Logger.Warn("catalogue titles not read", "err", err)
+		}
+	}
+	rows, err := r.Pool.Query(ctx, "SELECT e.code, e.message FROM unnest($1::text[]) c, api.get_error_by_code(c) e", titleCodes)
+	if err != nil {
+		warn(err)
+		return
+	}
+	defer rows.Close()
+	titles := map[string]string{}
+	for rows.Next() {
+		var code string
+		var msg *string
+		if err := rows.Scan(&code, &msg); err != nil {
+			warn(err)
+			return
+		}
+		if msg != nil && usableTitle(*msg) {
+			titles[code] = *msg
+		}
+	}
+	if err := rows.Err(); err != nil {
+		warn(err)
+		return
+	}
+	r.titles = titles
 }
 
 func featuresFrom(procs []proc) Features {
@@ -194,7 +257,9 @@ func (r *Runner) Do(ctx context.Context, s Session, req *Request, fn func(ctx co
 		if message != nil {
 			detail = *message
 		}
-		p := problem.New(401, "unauthorized", "Unauthorized", detail)
+		// the session the database does not know — v1 answers the same with
+		// LoginFailed; its own message ("Session code not found.") is the detail
+		p := problem.Unauthorized(r, problem.CodeLoginFailed, detail)
 		if journal {
 			// no session context to lose: the row carries the path and the
 			// status, api_log.session stays empty
@@ -351,7 +416,7 @@ func (r *Runner) explain(ctx context.Context, err error) error {
 			var msg string
 			// the catalogue message may be a format template ("… \"%s\" …"); a
 			// template is no title — the raised text (already filled in) is
-			if qerr := r.Pool.QueryRow(lookup, "SELECT message FROM api.get_error_by_code($1)", code).Scan(&msg); qerr == nil && msg != "" && !strings.Contains(msg, "%") {
+			if qerr := r.Pool.QueryRow(lookup, "SELECT message FROM api.get_error_by_code($1)", code).Scan(&msg); qerr == nil && usableTitle(msg) {
 				title = msg
 			}
 		}
