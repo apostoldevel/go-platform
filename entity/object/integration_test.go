@@ -24,7 +24,7 @@ func live(t *testing.T) *resttest.Live {
 // two ways to run something on it, refused by the database without a change.
 func TestIntegration_ObjectMethodsSearchAndRefusedRuns(t *testing.T) {
 	l := live(t)
-	p := resttest.ListOf(t, l.Call("GET", "/api/v2/objects?filter[statetypecode]=enabled&resttest.Page[limit]=1", ""), "an enabled object")
+	p := resttest.ListOf(t, l.Call("GET", "/api/v2/objects?filter[statetypecode]=enabled&page[limit]=1", ""), "an enabled object")
 	id, _ := p.Items[0]["id"].(string)
 	entity, _ := p.Items[0]["entitycode"].(string)
 	label, _ := p.Items[0]["label"].(string)

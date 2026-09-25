@@ -19,7 +19,7 @@ func live(t *testing.T) *resttest.Live {
 // the parity of what the functions answer for a node that is not there.
 func TestIntegration_ShapesOnAnEmptyTree(t *testing.T) {
 	l := live(t)
-	rec := l.Call("GET", "/api/v2/kladr?resttest.Page[limit]=1", "")
+	rec := l.Call("GET", "/api/v2/kladr?page[limit]=1", "")
 	var page resttest.Page
 	var total int64
 	_ = json.Unmarshal(l.Direct(t, "SELECT to_json(c) FROM api.count_address_tree() c"), &total)

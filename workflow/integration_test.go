@@ -25,7 +25,7 @@ func TestIntegration_CataloguesAndClassScopedReads(t *testing.T) {
 	for _, res := range []struct {
 		path, getFn string
 	}{{"entities", "api.get_entity"}, {"actions", "api.get_action"}, {"priorities", "api.get_priority"}, {"classes", "api.get_class"}, {"types", "api.get_type"}, {"states", "api.get_state"}, {"methods", "api.get_method"}, {"transitions", "api.get_transition"}, {"events", "api.get_event"}} {
-		p := resttest.ListOf(t, l.Call("GET", "/api/v2/"+res.path+"?resttest.Page[limit]=3", ""), res.path)
+		p := resttest.ListOf(t, l.Call("GET", "/api/v2/"+res.path+"?page[limit]=3", ""), res.path)
 		id, _ := p.Items[0]["id"].(string)
 		rec := l.Call("GET", "/api/v2/"+res.path+"/"+id, "")
 		if rec.Code != 200 || !resttest.SameJSON(rec.Body.Bytes(), l.Direct(t, "SELECT row_to_json(t) FROM "+res.getFn+"($1::uuid) t", id)) {
@@ -36,7 +36,7 @@ func TestIntegration_CataloguesAndClassScopedReads(t *testing.T) {
 		}
 	}
 	// a concrete class (one that has a type) and what the constructor shows for it
-	aType := resttest.ListOf(t, l.Call("GET", "/api/v2/types?resttest.Page[limit]=1", ""), "a type")
+	aType := resttest.ListOf(t, l.Call("GET", "/api/v2/types?page[limit]=1", ""), "a type")
 	class, _ := aType.Items[0]["class"].(string)
 	for sub, sort := range map[string]string{"types": "code", "states": "sequence", "methods": "sequence", "events": "sequence"} {
 		resttest.ListOf(t, l.Call("GET", "/api/v2/"+sub+"?filter[class]="+class+"&sort="+sort, ""), sub+" of the class")
@@ -51,7 +51,7 @@ func TestIntegration_CataloguesAndClassScopedReads(t *testing.T) {
 	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &bits) != nil || len(bits) != 5 {
 		t.Fatalf("class access decode: %d %s", rec.Code, rec.Body)
 	}
-	methods := resttest.ListOf(t, l.Call("GET", "/api/v2/methods?filter[class]="+class+"&resttest.Page[limit]=1", ""), "one method")
+	methods := resttest.ListOf(t, l.Call("GET", "/api/v2/methods?filter[class]="+class+"&page[limit]=1", ""), "one method")
 	method, _ := methods.Items[0]["id"].(string)
 	rec = l.Call("GET", "/api/v2/methods/"+method+"/access/decode", "")
 	bits = nil
@@ -68,7 +68,7 @@ func TestIntegration_CataloguesAndClassScopedReads(t *testing.T) {
 	if !granted {
 		t.Log("api.state_type is not granted to the pool's role — GET /api/v2/state-types and /event-types answer 500 until the database grants SELECT on api.* views")
 	}
-	stateTypes := resttest.ListOf(t, l.Call("GET", "/api/v2/states?resttest.Page[limit]=1", ""), "a state")
+	stateTypes := resttest.ListOf(t, l.Call("GET", "/api/v2/states?page[limit]=1", ""), "a state")
 	st, _ := stateTypes.Items[0]["type"].(string)
 	if rec = l.Call("GET", "/api/v2/state-types/"+st, ""); rec.Code != 200 {
 		t.Fatalf("state-types/{id}: %d %s", rec.Code, rec.Body)

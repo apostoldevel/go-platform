@@ -20,7 +20,7 @@ func live(t *testing.T) *resttest.Live {
 // code — each with parity against api.*; an unknown code is 404.
 func TestIntegration_CatalogueReads(t *testing.T) {
 	l := live(t)
-	p := resttest.ListOf(t, l.Call("GET", "/api/v2/errors?filter[http_code]=401&resttest.Page[limit]=2", ""), "errors 401")
+	p := resttest.ListOf(t, l.Call("GET", "/api/v2/errors?filter[http_code]=401&page[limit]=2", ""), "errors 401")
 	id, _ := p.Items[0]["id"].(string)
 	code, _ := p.Items[0]["code"].(string)
 	rec := l.Call("GET", "/api/v2/errors/"+id, "")
