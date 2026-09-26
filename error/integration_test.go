@@ -21,6 +21,11 @@ func live(t *testing.T) *resttest.Live {
 func TestIntegration_CatalogueReads(t *testing.T) {
 	l := live(t)
 	p := resttest.ListOf(t, l.Call("GET", "/api/v2/errors?filter[http_code]=401&page[limit]=2", ""), "errors 401")
+	// the page is honoured: a lost page[limit] (a renamed key lib/query
+	// ignores) came back the default 500 rows and passed unnoticed
+	if len(p.Items) == 0 || len(p.Items) > 2 {
+		t.Fatalf("page[limit]=2 gave %d items", len(p.Items))
+	}
 	id, _ := p.Items[0]["id"].(string)
 	code, _ := p.Items[0]["code"].(string)
 	rec := l.Call("GET", "/api/v2/errors/"+id, "")
