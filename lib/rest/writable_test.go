@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/apostoldevel/go-platform/lib/pgtx"
 	"github.com/apostoldevel/go-platform/lib/rest"
 )
 
@@ -15,11 +16,13 @@ type xBody struct {
 }
 
 func (b *xBody) Validate(create bool) error { return rest.Required("code", b.Code, create) }
-func (b *xBody) Args(id any) []any          { return []any{id, b.Code, b.Name} }
+func (b *xBody) Args(id any) pgtx.Args {
+	return pgtx.Args{"id": id, "code": b.Code, "name": b.Name}
+}
 
 var xs = rest.Writable{
 	Resource: rest.Resource{Prefix: "/api/v2/xs", GetFn: "api.get_x", ListFn: "api.list_x", CountFn: "api.count_x"},
-	SetSQL:   "SELECT row_to_json(t) FROM api.set_x($1::uuid, $2, $3) t",
+	SetFn:    "api.set_x",
 	NewBody:  func() rest.Body { return &xBody{} },
 	DeleteFn: "api.delete_x",
 }
@@ -111,5 +114,19 @@ func TestWritable_NoDeleteFnNoDeleteRoute(t *testing.T) {
 	r, _ := http.NewRequest("DELETE", "http://x/api/v2/xs/7f3a0000-0000-4000-8000-000000000001", nil)
 	if _, got := mux.Handler(r); got == "DELETE /api/v2/xs/{id}" {
 		t.Fatalf("DELETE routed without a delete function")
+	}
+}
+
+// A key api.add_<x> has no parameter for is refused on create, before the
+// database — not dropped in silence (CreateOmit).
+func TestWritable_CreateOmitRefusedBeforeTheDatabase(t *testing.T) {
+	ys := xs
+	ys.CreateFn, ys.CreateOmit = "api.add_x", []string{"name"}
+	mux := http.NewServeMux()
+	ys.Routes(mux, noDB{t}, rest.NewIdempotency(0), nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/api/v2/xs", strings.NewReader(`{"code":"c","name":"n"}`)))
+	if rec.Code != 400 || !strings.Contains(rec.Body.String(), "name is not taken on create") {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
 	}
 }

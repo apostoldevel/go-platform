@@ -3,10 +3,12 @@ package admin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
 	platform "github.com/apostoldevel/go-platform"
+	"github.com/apostoldevel/go-platform/lib/pgtx"
 	"github.com/apostoldevel/go-platform/lib/problem"
 	"github.com/apostoldevel/go-platform/lib/rest"
 	"github.com/jackc/pgx/v5"
@@ -18,7 +20,7 @@ import (
 // api.change_password, api.get/set_user_iptable, api.member_*, api.user_member).
 var users = rest.Writable{
 	Resource: rest.Resource{Prefix: "/api/v2/users", GetFn: "api.get_user", ListFn: "api.list_user", CountFn: "api.count_user"},
-	SetSQL:   "SELECT row_to_json(t) FROM api.set_user($1::uuid, $2, $3, $4, $5, $6, $7, $8::boolean, $9::boolean) t",
+	SetFn:    "api.set_user",
 	NewBody:  func() rest.Body { return &userBody{} },
 	DeleteFn: "api.delete_user",
 	Redact:   redact, // absent flags default in api.add_user (db-platform ≥ 1.2.21)
@@ -52,8 +54,8 @@ type userBody struct {
 }
 
 func (b *userBody) Validate(create bool) error { return rest.Required("username", b.Username, create) }
-func (b *userBody) Args(id any) []any {
-	return []any{id, b.Username, b.Password, b.Name, b.Phone, b.Email, b.Description, b.PasswordChange, b.PasswordNotChange}
+func (b *userBody) Args(id any) pgtx.Args {
+	return pgtx.Args{"id": id, "username": b.Username, "password": b.Password, "name": b.Name, "phone": b.Phone, "email": b.Email, "description": b.Description, "passwordchange": b.PasswordChange, "passwordnotchange": b.PasswordNotChange}
 }
 
 // redact keeps passwords out of api.log_request, as AddApiLog does for v1.
@@ -136,7 +138,7 @@ func (m *module) userProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	m.patch(w, r, id, raw, func(ctx context.Context, tx pgx.Tx, id string) error {
-		_, err := tx.Exec(ctx, "SELECT api.set_user_profile($1::uuid, $2, $3, $4, $5, $6, $7, $8)", id, b.FamilyName, b.GivenName, b.PatronymicName, b.Locale, b.Area, b.Interface, b.Picture)
+		_, err := pgtx.Call(ctx, tx, "set_user_profile", pgtx.Args{"userid": id, "familyname": b.FamilyName, "givenname": b.GivenName, "patronymicname": b.PatronymicName, "locale": b.Locale, "area": b.Area, "interface": b.Interface, "picture": b.Picture})
 		return err
 	})
 }
@@ -168,7 +170,7 @@ func (m *module) userAction(w http.ResponseWriter, r *http.Request) {
 		if _, err := users.GetRow(ctx, tx, id); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, "SELECT "+fn+"($1::uuid)", id); err != nil {
+		if _, err := pgtx.Call(ctx, tx, fn, pgtx.Args{"id": id}); err != nil {
 			return err
 		}
 		row, err = users.GetRow(ctx, tx, id)
@@ -197,7 +199,7 @@ func (m *module) changePassword(w http.ResponseWriter, r *http.Request, id strin
 		return
 	}
 	if err := m.cfg.Doer.Do(r.Context(), platform.SessionOf(r), rest.ReqOf(r, 204, redact(raw)), func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, "SELECT api.change_password($1::uuid, $2, $3)", id, *b.Old, *b.New)
+		_, err := pgtx.Call(ctx, tx, "change_password", pgtx.Args{"id": id, "oldpass": *b.Old, "newpass": *b.New})
 		return err
 	}); err != nil {
 		rest.Fail(w, r, m.log, err)
@@ -243,8 +245,18 @@ func (m *module) userIptableGet(w http.ResponseWriter, r *http.Request) {
 			into *[]string
 		}{{"A", &t.Allow}, {"D", &t.Deny}} {
 			var list *string
-			if err := tx.QueryRow(ctx, "SELECT iptable FROM api.get_user_iptable($1::uuid, $2)", id, kind.code).Scan(&list); err != nil && err != pgx.ErrNoRows {
+			row, err := pgtx.CallRow(ctx, tx, "get_user_iptable", pgtx.Args{"id": id, "type": kind.code})
+			if err != nil && !errors.Is(err, pgtx.ErrNoRow) {
 				return err
+			}
+			if row != nil {
+				var t struct {
+					Iptable *string `json:"iptable"`
+				}
+				if err := json.Unmarshal(row, &t); err != nil {
+					return err
+				}
+				list = t.Iptable
 			}
 			*kind.into = []string{}
 			if list != nil {
@@ -286,7 +298,7 @@ func (m *module) userIptablePut(w http.ResponseWriter, r *http.Request) {
 				s := strings.Join(kind.list, ",")
 				text = &s
 			}
-			if _, err := tx.Exec(ctx, "SELECT api.set_user_iptable($1::uuid, $2, $3)", id, kind.code, text); err != nil {
+			if _, err := pgtx.Call(ctx, tx, "set_user_iptable", pgtx.Args{"id": id, "type": kind.code, "iptable": text}); err != nil {
 				return err
 			}
 		}
@@ -309,16 +321,18 @@ func (m *module) userIptablePut(w http.ResponseWriter, r *http.Request) {
 // ── memberships ────────────────────────────────────────────────────────
 
 // membership is one of the three "user is a member of" relations of the admin
-// module: api.member_<x>(userid) lists, api.member_<x>_add/_delete change.
+// module: api.member_<x>(pUserId) lists, api.member_<x>_add/_delete(pMember,
+// p<X>) change — key is the name of that second parameter.
 type membership struct {
 	path string // groups | areas | interfaces
 	fn   string // api.member_group | api.member_area | api.member_interface
+	key  string // group | area | interface
 }
 
 var memberships = []membership{
-	{"groups", "api.member_group"},
-	{"areas", "api.member_area"},
-	{"interfaces", "api.member_interface"},
+	{"groups", "api.member_group", "group"},
+	{"areas", "api.member_area", "area"},
+	{"interfaces", "api.member_interface", "interface"},
 }
 
 func (m *module) membershipList(ms membership) http.HandlerFunc {
@@ -333,7 +347,7 @@ func (m *module) membershipList(ms membership) http.HandlerFunc {
 			if _, err := users.GetRow(ctx, tx, id); err != nil {
 				return err
 			}
-			rows, err = rest.Rows(ctx, tx, "SELECT row_to_json(t) FROM "+ms.fn+"($1::uuid) t", id)
+			rows, err = pgtx.Call(ctx, tx, ms.fn, pgtx.Args{"userid": id})
 			return err
 		})
 		if err != nil {
@@ -365,7 +379,7 @@ func (m *module) membershipAdd(ms membership) http.HandlerFunc {
 			return
 		}
 		if err := m.cfg.Doer.Do(r.Context(), platform.SessionOf(r), rest.ReqOf(r, 204, raw), func(ctx context.Context, tx pgx.Tx) error {
-			_, err := tx.Exec(ctx, "SELECT "+ms.fn+"_add($1::uuid, $2::uuid)", id, b.ID)
+			_, err := pgtx.Call(ctx, tx, ms.fn+"_add", pgtx.Args{"member": id, ms.key: b.ID})
 			return err
 		}); err != nil {
 			rest.Fail(w, r, m.log, err)
@@ -388,7 +402,7 @@ func (m *module) membershipDelete(ms membership) http.HandlerFunc {
 			return
 		}
 		if err := m.cfg.Doer.Do(r.Context(), platform.SessionOf(r), rest.ReqOf(r, 204, nil), func(ctx context.Context, tx pgx.Tx) error {
-			_, err := tx.Exec(ctx, "SELECT "+ms.fn+"_delete($1::uuid, $2::uuid)", id, gid)
+			_, err := pgtx.Call(ctx, tx, ms.fn+"_delete", pgtx.Args{"member": id, ms.key: gid})
 			return err
 		}); err != nil {
 			rest.Fail(w, r, m.log, err)
@@ -411,7 +425,7 @@ func (m *module) userMemberships(w http.ResponseWriter, r *http.Request) {
 		if _, err := users.GetRow(ctx, tx, id); err != nil {
 			return err
 		}
-		rows, err = rest.Rows(ctx, tx, "SELECT row_to_json(t) FROM api.user_member($1::uuid) t", id)
+		rows, err = pgtx.Call(ctx, tx, "user_member", pgtx.Args{"userid": id})
 		return err
 	})
 	if err != nil {

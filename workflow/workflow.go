@@ -15,6 +15,7 @@ import (
 	"time"
 
 	platform "github.com/apostoldevel/go-platform"
+	"github.com/apostoldevel/go-platform/lib/pgtx"
 	"github.com/apostoldevel/go-platform/lib/problem"
 	"github.com/apostoldevel/go-platform/lib/rest"
 	"github.com/jackc/pgx/v5"
@@ -49,37 +50,37 @@ var (
 var (
 	types = rest.Writable{
 		Resource: rest.Resource{Prefix: "/api/v2/types", GetFn: "api.get_type", ListFn: "api.list_type", CountFn: "api.count_type"},
-		SetSQL:   "SELECT row_to_json(t) FROM api.set_type($1::uuid, $2::uuid, $3, $4, $5) t",
+		SetFn:    "api.set_type",
 		NewBody:  func() rest.Body { return &typeBody{} },
 		DeleteFn: "api.delete_type",
 	}
 	classes = rest.Writable{
 		Resource: rest.Resource{Prefix: "/api/v2/classes", GetFn: "api.get_class", ListFn: "api.list_class", CountFn: "api.count_class"},
-		SetSQL:   "SELECT row_to_json(t) FROM api.set_class($1::uuid, $2::uuid, $3::uuid, $4, $5, $6::boolean) t",
+		SetFn:    "api.set_class",
 		NewBody:  func() rest.Body { return &classBody{} },
 		DeleteFn: "api.delete_class",
 	}
 	states = rest.Writable{
 		Resource: rest.Resource{Prefix: "/api/v2/states", GetFn: "api.get_state", ListFn: "api.list_state", CountFn: "api.count_state"},
-		SetSQL:   "SELECT row_to_json(t) FROM api.set_state($1::uuid, $2::uuid, $3::uuid, $4, $5, $6::integer) t",
+		SetFn:    "api.set_state",
 		NewBody:  func() rest.Body { return &stateBody{} },
 		DeleteFn: "api.delete_state",
 	}
 	methods = rest.Writable{
 		Resource: rest.Resource{Prefix: "/api/v2/methods", GetFn: "api.get_method", ListFn: "api.list_method", CountFn: "api.count_method"},
-		SetSQL:   "SELECT row_to_json(t) FROM api.set_method($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6, $7, $8::integer, $9::boolean) t",
+		SetFn:    "api.set_method",
 		NewBody:  func() rest.Body { return &methodBody{} },
 		DeleteFn: "api.delete_method",
 	}
 	transitions = rest.Writable{
 		Resource: rest.Resource{Prefix: "/api/v2/transitions", GetFn: "api.get_transition", ListFn: "api.list_transition", CountFn: "api.count_transition"},
-		SetSQL:   "SELECT row_to_json(t) FROM api.set_transition($1::uuid, $2::uuid, $3::uuid, $4::uuid) t",
+		SetFn:    "api.set_transition",
 		NewBody:  func() rest.Body { return &transitionBody{} },
 		DeleteFn: "api.delete_transition",
 	}
 	events = rest.Writable{
 		Resource: rest.Resource{Prefix: "/api/v2/events", GetFn: "api.get_event", ListFn: "api.list_event", CountFn: "api.count_event"},
-		SetSQL:   "SELECT row_to_json(t) FROM api.set_event($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6, $7::integer, $8::boolean) t",
+		SetFn:    "api.set_event",
 		NewBody:  func() rest.Body { return &eventBody{} },
 		DeleteFn: "api.delete_event",
 	}
@@ -97,7 +98,9 @@ type typeBody struct {
 func (b *typeBody) Validate(create bool) error {
 	return rest.RequiredAll(create, rest.Req("code", b.Code), rest.Req("class", b.Class))
 }
-func (b *typeBody) Args(id any) []any { return []any{id, b.Class, b.Code, b.Name, b.Description} }
+func (b *typeBody) Args(id any) pgtx.Args {
+	return pgtx.Args{"id": id, "class": b.Class, "code": b.Code, "name": b.Name, "description": b.Description}
+}
 
 type classBody struct {
 	Parent   *string `json:"parent"`
@@ -110,12 +113,12 @@ type classBody struct {
 func (b *classBody) Validate(create bool) error {
 	return rest.RequiredAll(create, rest.Req("code", b.Code), rest.Req("parent", b.Parent), rest.Req("entity", b.Entity))
 }
-func (b *classBody) Args(id any) []any {
+func (b *classBody) Args(id any) pgtx.Args {
 	abstract := true // api.set_class defaults pAbstract to true; absent keeps the default
 	if b.Abstract != nil {
 		abstract = *b.Abstract
 	}
-	return []any{id, b.Parent, b.Entity, b.Code, b.Label, abstract}
+	return pgtx.Args{"id": id, "parent": b.Parent, "entity": b.Entity, "code": b.Code, "label": b.Label, "abstract": abstract}
 }
 
 type stateBody struct {
@@ -129,8 +132,8 @@ type stateBody struct {
 func (b *stateBody) Validate(create bool) error {
 	return rest.RequiredAll(create, rest.Req("code", b.Code), rest.Req("class", b.Class), rest.Req("type", b.Type))
 }
-func (b *stateBody) Args(id any) []any {
-	return []any{id, b.Class, b.Type, b.Code, b.Label, b.Sequence}
+func (b *stateBody) Args(id any) pgtx.Args {
+	return pgtx.Args{"id": id, "class": b.Class, "type": b.Type, "code": b.Code, "label": b.Label, "sequence": b.Sequence}
 }
 
 type methodBody struct {
@@ -147,8 +150,8 @@ type methodBody struct {
 func (b *methodBody) Validate(create bool) error {
 	return rest.RequiredAll(create, rest.Req("class", b.Class), rest.Req("state", b.State), rest.Req("action", b.Action))
 }
-func (b *methodBody) Args(id any) []any {
-	return []any{id, b.Parent, b.Class, b.State, b.Action, b.Code, b.Label, b.Sequence, b.Visible}
+func (b *methodBody) Args(id any) pgtx.Args {
+	return pgtx.Args{"id": id, "parent": b.Parent, "class": b.Class, "state": b.State, "action": b.Action, "code": b.Code, "label": b.Label, "sequence": b.Sequence, "visible": b.Visible}
 }
 
 type transitionBody struct {
@@ -160,7 +163,9 @@ type transitionBody struct {
 func (b *transitionBody) Validate(create bool) error {
 	return rest.RequiredAll(create, rest.Req("state", b.State), rest.Req("method", b.Method), rest.Req("newstate", b.NewState))
 }
-func (b *transitionBody) Args(id any) []any { return []any{id, b.State, b.Method, b.NewState} }
+func (b *transitionBody) Args(id any) pgtx.Args {
+	return pgtx.Args{"id": id, "state": b.State, "method": b.Method, "newstate": b.NewState}
+}
 
 type eventBody struct {
 	Class    *string `json:"class"`
@@ -175,8 +180,8 @@ type eventBody struct {
 func (b *eventBody) Validate(create bool) error {
 	return rest.RequiredAll(create, rest.Req("class", b.Class), rest.Req("type", b.Type), rest.Req("action", b.Action))
 }
-func (b *eventBody) Args(id any) []any {
-	return []any{id, b.Class, b.Type, b.Action, b.Label, b.Text, b.Sequence, b.Enabled}
+func (b *eventBody) Args(id any) pgtx.Args {
+	return pgtx.Args{"id": id, "class": b.Class, "type": b.Type, "action": b.Action, "label": b.Label, "text": b.Text, "sequence": b.Sequence, "enabled": b.Enabled}
 }
 
 // ── module ─────────────────────────────────────────────────────────────
@@ -242,7 +247,7 @@ func (m *module) classAction(w http.ResponseWriter, r *http.Request) {
 			if _, err := classes.GetRow(ctx, tx, id); err != nil {
 				return err
 			}
-			_, err := tx.Exec(ctx, "SELECT api.copy_class($1::uuid, $2::uuid)", id, b.Destination)
+			_, err := pgtx.Call(ctx, tx, "copy_class", pgtx.Args{"source": id, "destination": b.Destination})
 			return err
 		}); err != nil {
 			rest.Fail(w, r, m.log, err)
@@ -270,7 +275,9 @@ func (m *module) classAction(w http.ResponseWriter, r *http.Request) {
 			if _, err := classes.GetRow(ctx, tx, id); err != nil {
 				return err
 			}
-			return tx.QueryRow(ctx, "SELECT row_to_json(t) FROM api.clone_class($1::uuid, $2::uuid, $3, $4, $5::boolean) t", id, b.Entity, b.Code, b.Label, abstract).Scan(&row)
+			var err error
+			row, err = pgtx.CallRow(ctx, tx, "clone_class", pgtx.Args{"parent": id, "entity": b.Entity, "code": b.Code, "label": b.Label, "abstract": abstract})
+			return err
 		}); err != nil {
 			rest.Fail(w, r, m.log, err)
 			return
@@ -299,11 +306,11 @@ func (m *module) chmodc(ctx context.Context, tx pgx.Tx, id string, b rest.Access
 	if b.ObjectSet != nil {
 		objectSet = *b.ObjectSet
 	}
-	_, err := tx.Exec(ctx, "SELECT api.chmodc($1::uuid, $2::int, $3::uuid, $4::boolean, $5::boolean)", id, *b.Mask, b.UserID, recursive, objectSet)
+	_, err := pgtx.Call(ctx, tx, "chmodc", pgtx.Args{"class": id, "mask": *b.Mask, "userid": b.UserID, "recursive": recursive, "objectset": objectSet})
 	return err
 }
 
 func (m *module) chmodm(ctx context.Context, tx pgx.Tx, id string, b rest.AccessBody) error {
-	_, err := tx.Exec(ctx, "SELECT api.chmodm($1::uuid, $2::int, $3::uuid)", id, *b.Mask, b.UserID)
+	_, err := pgtx.Call(ctx, tx, "chmodm", pgtx.Args{"method": id, "mask": *b.Mask, "userid": b.UserID})
 	return err
 }

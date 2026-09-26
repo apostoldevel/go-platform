@@ -10,6 +10,7 @@ import (
 	"time"
 
 	platform "github.com/apostoldevel/go-platform"
+	"github.com/apostoldevel/go-platform/lib/pgtx"
 	"github.com/apostoldevel/go-platform/lib/rest"
 )
 
@@ -30,8 +31,7 @@ type module struct {
 
 var resources = rest.Writable{
 	Resource: rest.Resource{Prefix: "/api/v2/resources", GetFn: "api.get_resource", ListFn: "api.list_resource", CountFn: "api.count_resource"},
-	// pLocaleCode defaults to the session's locale in the database; an explicit NULL would not, hence the coalesce
-	SetSQL:   "SELECT row_to_json(t) FROM api.set_resource($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, $9::integer, coalesce($10, (SELECT code FROM api.current_locale()))) t",
+	SetFn:    "api.set_resource",
 	NewBody:  func() rest.Body { return &body{} },
 	DeleteFn: "api.delete_resource",
 }
@@ -50,8 +50,13 @@ type body struct {
 }
 
 func (b *body) Validate(create bool) error { return rest.Required("name", b.Name, create) }
-func (b *body) Args(id any) []any {
-	return []any{id, b.Root, b.Node, b.Type, b.Name, b.Description, b.Encoding, b.Data, b.Sequence, b.LocaleCode}
+func (b *body) Args(id any) pgtx.Args {
+	a := pgtx.Args{"id": id, "root": b.Root, "node": b.Node, "type": b.Type, "name": b.Name, "description": b.Description, "encoding": b.Encoding, "data": b.Data, "sequence": b.Sequence}
+	// pLocaleCode defaults to the session's locale (locale_code()); an explicit NULL would not — absent, the key is left out
+	if b.LocaleCode != nil {
+		a["localecode"] = b.LocaleCode
+	}
+	return a
 }
 
 // New returns the package as a platform.Module.

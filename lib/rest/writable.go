@@ -1,24 +1,32 @@
 package rest
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
 
 	platform "github.com/apostoldevel/go-platform"
+	"github.com/apostoldevel/go-platform/lib/pgtx"
 	"github.com/apostoldevel/go-platform/lib/problem"
 	"github.com/jackc/pgx/v5"
 )
 
-// Body is the writable part of a resource's row: the parameters of its
-// api.set_<x>, in order, after the id. Validate(create): on create a
+// Body is the writable part of a resource's row: the named arguments of its
+// api.set_<x> (keys without the p, as pgtx.Call and daemon.call take them),
+// the id among them — nil on create. Every field of the body is passed, an
+// absent one as nil — an explicit NULL, which db-platform's api.set_<x> reads
+// as "keep"; a key is left out only where the parameter's DEFAULT is what an
+// absent field means and it is not NULL. Validate(create): on create a
 // required field must be present; on PATCH it may be absent (kept) but not
 // emptied.
 type Body interface {
 	Validate(create bool) error
-	Args(id any) []any
+	Args(id any) pgtx.Args
 }
 
 // Required is the one rule both ways: present and empty is always wrong,
@@ -76,9 +84,18 @@ func LocationOf(res Resource, row json.RawMessage) string {
 // creates (id NULL), PATCH updates (id set), DELETE deletes.
 type Writable struct {
 	Resource
-	SetSQL   string      // "SELECT row_to_json(t) FROM api.set_x($1::uuid, $2, …) t"
-	NewBody  func() Body // a fresh body to decode into
-	DeleteFn string      // "api.delete_x"
+	SetFn string // "api.set_x" — called with Body.Args
+	// CreateFn, when set, is the create instead of SetFn(NULL, …) — for an
+	// entity whose api.set_<x>(NULL, …) is an upsert by code, not a create
+	// (a client: pId := coalesce(pId, GetClient(pCode))). It is called with
+	// Body.Args(nil) less "id" and less CreateOmit (keys api.add_<x> has no
+	// parameter for: a body that sets one is 400 before the database),
+	// returns the new id (a uuid, or a number for IntID), and the answer is
+	// GetFn of it — a row the creator cannot see is a server fault, 500.
+	CreateFn   string
+	CreateOmit []string
+	NewBody    func() Body // a fresh body to decode into
+	DeleteFn   string      // "api.delete_x"
 	// Redact, when set, rewrites the body before api.log_request (passwords).
 	Redact func([]byte) []byte
 	// Defaults, when set, fills what the database will not accept as NULL on create.
@@ -117,6 +134,9 @@ func (wr Writable) Create(d Doer, idem *Idempotency, log *slog.Logger) http.Hand
 		if err == nil {
 			err = b.Validate(true)
 		}
+		if err == nil {
+			err = wr.omitted(b)
+		}
 		if err != nil {
 			Fail(w, r, log, err)
 			return
@@ -127,7 +147,9 @@ func (wr Writable) Create(d Doer, idem *Idempotency, log *slog.Logger) http.Hand
 		Once(w, r, idem, platform.SessionOf(r).Code, raw, log, func(w http.ResponseWriter) {
 			var row json.RawMessage
 			err := d.Do(r.Context(), platform.SessionOf(r), ReqOf(r, 201, wr.logged(raw)), func(ctx context.Context, tx pgx.Tx) error {
-				return tx.QueryRow(ctx, wr.SetSQL, b.Args(nil)...).Scan(&row)
+				var err error
+				row, err = wr.create(ctx, tx, b)
+				return err
 			})
 			if err != nil {
 				Fail(w, r, log, err)
@@ -173,7 +195,8 @@ func (wr Writable) Update(d Doer, log *slog.Logger) http.HandlerFunc {
 			if err := IfMatch(r, current); err != nil {
 				return err
 			}
-			return tx.QueryRow(ctx, wr.SetSQL, b.Args(id)...).Scan(&row)
+			row, err = pgtx.CallRow(ctx, tx, wr.SetFn, b.Args(id))
+			return err
 		})
 		if err != nil {
 			Fail(w, r, log, err)
@@ -193,15 +216,11 @@ func (wr Writable) Delete(d Doer, log *slog.Logger) http.HandlerFunc {
 			Fail(w, r, log, err)
 			return
 		}
-		cast := "$1::uuid"
-		if wr.IntID {
-			cast = "$1::bigint"
-		}
 		if err := d.Do(r.Context(), platform.SessionOf(r), ReqOf(r, 204, nil), func(ctx context.Context, tx pgx.Tx) error {
 			if _, err := wr.GetRow(ctx, tx, id); err != nil {
 				return err
 			}
-			_, err := tx.Exec(ctx, "SELECT "+wr.DeleteFn+"("+cast+")", id)
+			_, err := pgtx.Call(ctx, tx, wr.DeleteFn, pgtx.Args{"id": id})
 			return err
 		}); err != nil {
 			Fail(w, r, log, err)
@@ -209,4 +228,63 @@ func (wr Writable) Delete(d Doer, log *slog.Logger) http.HandlerFunc {
 		}
 		w.WriteHeader(204)
 	}
+}
+
+// omitted refuses a key of CreateOmit the body sets: api.add_<x> has no
+// parameter for it, and dropping the client's value in silence is worse.
+func (wr Writable) omitted(b Body) error {
+	if wr.CreateFn == "" {
+		return nil
+	}
+	args := b.Args(nil)
+	for _, k := range wr.CreateOmit {
+		if args[k] != nil {
+			return problem.New(400, "validation", "Bad request", k+" is not taken on create")
+		}
+	}
+	return nil
+}
+
+// create is POST's write: SetFn(NULL, …), or CreateFn and the row it made.
+func (wr Writable) create(ctx context.Context, tx pgx.Tx, b Body) (json.RawMessage, error) {
+	if wr.CreateFn == "" {
+		return pgtx.CallRow(ctx, tx, wr.SetFn, b.Args(nil))
+	}
+	args := b.Args(nil)
+	delete(args, "id")
+	for _, k := range wr.CreateOmit {
+		delete(args, k)
+	}
+	out, err := pgtx.CallRow(ctx, tx, wr.CreateFn, args)
+	if errors.Is(err, pgtx.ErrNoRow) {
+		return nil, fmt.Errorf("%s returned no row", wr.CreateFn)
+	} else if err != nil {
+		return nil, err
+	}
+	dec := json.NewDecoder(bytes.NewReader(out))
+	dec.UseNumber()
+	var id any
+	if err := dec.Decode(&id); err != nil {
+		return nil, fmt.Errorf("%s returned %s: %w", wr.CreateFn, out, err)
+	}
+	switch v := id.(type) {
+	case string:
+		if v == "" {
+			return nil, fmt.Errorf("%s returned an empty id", wr.CreateFn)
+		}
+	case json.Number:
+		n, err := v.Int64()
+		if err != nil {
+			return nil, fmt.Errorf("%s returned %s: %w", wr.CreateFn, v, err)
+		}
+		id = n
+	default:
+		return nil, fmt.Errorf("%s returned %s, not an id", wr.CreateFn, out)
+	}
+	row, err := wr.GetRow(ctx, tx, id)
+	var p *problem.Problem
+	if errors.As(err, &p) && p.Status == 404 {
+		return nil, fmt.Errorf("%s made %v, and %s does not show it to its creator", wr.CreateFn, id, wr.GetFn)
+	}
+	return row, err
 }

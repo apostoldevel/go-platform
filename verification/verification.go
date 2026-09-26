@@ -13,6 +13,7 @@ import (
 	"time"
 
 	platform "github.com/apostoldevel/go-platform"
+	"github.com/apostoldevel/go-platform/lib/pgtx"
 	"github.com/apostoldevel/go-platform/lib/problem"
 	"github.com/apostoldevel/go-platform/lib/rest"
 	"github.com/jackc/pgx/v5"
@@ -101,7 +102,9 @@ func (m *module) create(w http.ResponseWriter, r *http.Request) {
 	rest.Once(w, r, m.idem, platform.SessionOf(r).Code, raw, m.log, func(w http.ResponseWriter) {
 		var row json.RawMessage
 		err := m.cfg.Doer.Do(r.Context(), platform.SessionOf(r), rest.ReqOf(r, 201, raw), func(ctx context.Context, tx pgx.Tx) error {
-			return tx.QueryRow(ctx, "SELECT row_to_json(t) FROM api.new_verification_code($1::char, $2) t", kind, b.Code).Scan(&row)
+			var err error
+			row, err = pgtx.CallRow(ctx, tx, "new_verification_code", pgtx.Args{"type": kind, "code": b.Code})
+			return err
 		})
 		if err != nil {
 			rest.Fail(w, r, m.log, err)
@@ -128,9 +131,18 @@ func (m *module) confirm(w http.ResponseWriter, r *http.Request) {
 	var ok bool
 	var message *string
 	err = m.cfg.Doer.Do(r.Context(), platform.SessionOf(r), rest.ReqOf(r, 200, raw), func(ctx context.Context, tx pgx.Tx) error {
-		if err := tx.QueryRow(ctx, "SELECT result, message FROM api.confirm_verification_code($1::char, $2)", kind, *b.Code).Scan(&ok, &message); err != nil {
+		row, err := pgtx.CallRow(ctx, tx, "confirm_verification_code", pgtx.Args{"type": kind, "code": *b.Code})
+		if err != nil {
 			return err
 		}
+		var res struct {
+			Result  bool    `json:"result"`
+			Message *string `json:"message"`
+		}
+		if err := json.Unmarshal(row, &res); err != nil {
+			return err
+		}
+		ok, message = res.Result, res.Message
 		if !ok {
 			detail := "the code is not valid"
 			if message != nil && *message != "" {

@@ -16,6 +16,7 @@ import (
 	"strconv"
 
 	platform "github.com/apostoldevel/go-platform"
+	"github.com/apostoldevel/go-platform/lib/pgtx"
 	"github.com/apostoldevel/go-platform/lib/problem"
 	"github.com/apostoldevel/go-platform/lib/rest"
 	"github.com/jackc/pgx/v5"
@@ -104,7 +105,7 @@ func (m *module) list(w http.ResponseWriter, r *http.Request) {
 	if q.Get("extended") == "true" {
 		fn = "api.registry_ex"
 	}
-	rest.RowsHandler(m.cfg.Doer, m.log, "SELECT row_to_json(t) FROM "+fn+"($1::uuid, $2::uuid, $3::uuid) t", id, key, subkey)(w, r)
+	rest.CallRowsHandler(m.cfg.Doer, m.log, fn, pgtx.Args{"id": id, "key": key, "subkey": subkey})(w, r)
 }
 
 func (m *module) keys(w http.ResponseWriter, r *http.Request) {
@@ -118,7 +119,7 @@ func (m *module) keys(w http.ResponseWriter, r *http.Request) {
 		}
 		ids[i] = v
 	}
-	rest.RowsHandler(m.cfg.Doer, m.log, "SELECT row_to_json(t) FROM api.registry_key($1::uuid, $2::uuid, $3::uuid, $4) t", ids[0], ids[1], ids[2], textParam(q, "key"))(w, r)
+	rest.CallRowsHandler(m.cfg.Doer, m.log, "registry_key", pgtx.Args{"id": ids[0], "root": ids[1], "parent": ids[2], "key": textParam(q, "key")})(w, r)
 }
 
 func (m *module) keyPath(w http.ResponseWriter, r *http.Request) {
@@ -129,7 +130,7 @@ func (m *module) keyPath(w http.ResponseWriter, r *http.Request) {
 	}
 	var path *string
 	err = m.cfg.Doer.Do(r.Context(), platform.SessionOf(r), rest.ReqOf(r, 200, nil), func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, "SELECT api.registry_get_reg_key($1::uuid)", id).Scan(&path)
+		return pgtx.CallScalar(ctx, tx, "registry_get_reg_key", pgtx.Args{"key": id}, &path)
 	})
 	if err != nil {
 		rest.Fail(w, r, m.log, err)
@@ -158,7 +159,7 @@ func (m *module) enumKeys(w http.ResponseWriter, r *http.Request) {
 		rest.Fail(w, r, m.log, err)
 		return
 	}
-	rest.RowsHandler(m.cfg.Doer, m.log, "SELECT row_to_json(t) FROM api.registry_enum_key($1, $2) t", key, subkey)(w, r)
+	rest.CallRowsHandler(m.cfg.Doer, m.log, "registry_enum_key", pgtx.Args{"key": key, "subkey": subkey})(w, r)
 }
 
 func (m *module) enumValues(w http.ResponseWriter, r *http.Request) {
@@ -171,7 +172,7 @@ func (m *module) enumValues(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("extended") == "true" {
 		fn = "api.registry_enum_value_ex"
 	}
-	rest.RowsHandler(m.cfg.Doer, m.log, "SELECT row_to_json(t) FROM "+fn+"($1, $2) t", key, subkey)(w, r)
+	rest.CallRowsHandler(m.cfg.Doer, m.log, fn, pgtx.Args{"key": key, "subkey": subkey})(w, r)
 }
 
 func (m *module) read(w http.ResponseWriter, r *http.Request) {
@@ -186,7 +187,9 @@ func (m *module) read(w http.ResponseWriter, r *http.Request) {
 	}
 	var row json.RawMessage
 	err = m.cfg.Doer.Do(r.Context(), platform.SessionOf(r), rest.ReqOf(r, 200, nil), func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, "SELECT row_to_json(t) FROM api.registry_read($1, $2, $3) t", key, subkey, q.Get("name")).Scan(&row)
+		var err error
+		row, err = pgtx.CallRow(ctx, tx, "registry_read", pgtx.Args{"key": key, "subkey": subkey, "valuename": q.Get("name")})
+		return err
 	})
 	if err != nil {
 		rest.Fail(w, r, m.log, err)
@@ -206,18 +209,20 @@ type valueBody struct {
 	Value  json.RawMessage `json:"value"`
 }
 
+// variantTypes: the Variant's type code and the SQL type pData is pinned to
+// — pData is anynonarray, which no name alone can type.
 var variantTypes = map[string]struct {
 	code int
-	cast string
+	sql  string
 }{
-	"integer":  {0, "$6::integer"},
-	"numeric":  {1, "$6::numeric"},
-	"datetime": {2, "$6::timestamp"},
-	"string":   {3, "$6::text"},
-	"boolean":  {4, "$6::boolean"},
+	"integer":  {0, "integer"},
+	"numeric":  {1, "numeric"},
+	"datetime": {2, "timestamp"},
+	"string":   {3, "text"},
+	"boolean":  {4, "boolean"},
 }
 
-// typed turns the JSON value into what pgx sends for the cast: numbers and
+// typed turns the JSON value into what pgx sends for the pinned type: numbers and
 // booleans as themselves, the rest as text.
 func (b valueBody) typed() (any, error) {
 	var v any
@@ -283,7 +288,7 @@ func (m *module) write(w http.ResponseWriter, r *http.Request) {
 	}
 	var id string
 	err = m.cfg.Doer.Do(r.Context(), platform.SessionOf(r), rest.ReqOf(r, 200, raw), func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, "SELECT api.registry_write($1::uuid, $2, $3, $4, $5::integer, "+vt.cast+")", b.ID, b.Key, b.SubKey, b.Name, vt.code, value).Scan(&id)
+		return pgtx.CallScalar(ctx, tx, "registry_write", pgtx.Args{"id": b.ID, "key": b.Key, "subkey": b.SubKey, "valuename": b.Name, "type": vt.code, "data": pgtx.Typed{V: value, Type: vt.sql}}, &id)
 	})
 	if err != nil {
 		rest.Fail(w, r, m.log, err)
@@ -293,9 +298,9 @@ func (m *module) write(w http.ResponseWriter, r *http.Request) {
 	rest.WriteJSON(w, 200, body)
 }
 
-func (m *module) exec(w http.ResponseWriter, r *http.Request, sql string, args ...any) {
+func (m *module) exec(w http.ResponseWriter, r *http.Request, fn string, args pgtx.Args) {
 	if err := m.cfg.Doer.Do(r.Context(), platform.SessionOf(r), rest.ReqOf(r, 204, nil), func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, sql, args...)
+		_, err := pgtx.Call(ctx, tx, fn, args)
 		return err
 	}); err != nil {
 		rest.Fail(w, r, m.log, err)
@@ -310,7 +315,7 @@ func (m *module) deleteValueByID(w http.ResponseWriter, r *http.Request) {
 		rest.Fail(w, r, m.log, err)
 		return
 	}
-	m.exec(w, r, "SELECT api.registry_delete_value($1::uuid, NULL, NULL, NULL)", id)
+	m.exec(w, r, "registry_delete_value", pgtx.Args{"id": id, "key": nil, "subkey": nil, "valuename": nil})
 }
 
 func (m *module) deleteValue(w http.ResponseWriter, r *http.Request) {
@@ -323,7 +328,7 @@ func (m *module) deleteValue(w http.ResponseWriter, r *http.Request) {
 		rest.Fail(w, r, m.log, err)
 		return
 	}
-	m.exec(w, r, "SELECT api.registry_delete_value(NULL, $1, $2, $3)", key, subkey, q.Get("name"))
+	m.exec(w, r, "registry_delete_value", pgtx.Args{"id": nil, "key": key, "subkey": subkey, "valuename": q.Get("name")})
 }
 
 func (m *module) deleteKey(w http.ResponseWriter, r *http.Request) {
@@ -332,7 +337,7 @@ func (m *module) deleteKey(w http.ResponseWriter, r *http.Request) {
 		rest.Fail(w, r, m.log, err)
 		return
 	}
-	m.exec(w, r, "SELECT api.registry_delete_key($1, $2)", key, subkey)
+	m.exec(w, r, "registry_delete_key", pgtx.Args{"key": key, "subkey": subkey})
 }
 
 func (m *module) deleteTree(w http.ResponseWriter, r *http.Request) {
@@ -341,5 +346,5 @@ func (m *module) deleteTree(w http.ResponseWriter, r *http.Request) {
 		rest.Fail(w, r, m.log, err)
 		return
 	}
-	m.exec(w, r, "SELECT api.registry_delete_tree($1, $2)", key, subkey)
+	m.exec(w, r, "registry_delete_tree", pgtx.Args{"key": key, "subkey": subkey})
 }

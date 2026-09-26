@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -43,6 +44,7 @@ func TestPatch_DecidesBeforeTheDatabase(t *testing.T) {
 		"unknown key":    `{"session":"x"}`,
 		"empty area":     `{"area":""}`,
 		"bad oper_date":  `{"oper_date":"yesterday"}`,
+		"interface code": `{"interface":"default"}`,
 	} {
 		rec := httptest.NewRecorder()
 		mux.ServeHTTP(rec, httptest.NewRequest("PATCH", "/api/v2/me", strings.NewReader(body)))
@@ -52,13 +54,23 @@ func TestPatch_DecidesBeforeTheDatabase(t *testing.T) {
 	}
 }
 
-// area/interface/locale take a uuid or a code: the cast of the api.* overload
-// is chosen from the shape of the value.
-func TestCastOf_UUIDOrCode(t *testing.T) {
-	if got := castOf("7f3a0000-0000-4000-8000-000000000001"); got != "::uuid" {
-		t.Fatal(got)
-	}
-	if got := castOf("ru"); got != "::text" {
-		t.Fatal(got)
+// area/interface/locale take a uuid or a code: the overload is chosen from
+// the shape of the value — by the parameter's name for locale (pLocale /
+// pCode), by a pinned type for area (one name for both); interface is a uuid.
+func TestSessionArgs_UUIDOrCode(t *testing.T) {
+	const id = "7f3a0000-0000-4000-8000-000000000001"
+	for _, c := range []struct {
+		name, v string
+		want    pgtx.Args
+	}{
+		{"locale", id, pgtx.Args{"locale": id}},
+		{"locale", "ru", pgtx.Args{"code": "ru"}},
+		{"area", id, pgtx.Args{"area": pgtx.Typed{V: id, Type: "uuid"}}},
+		{"area", "default", pgtx.Args{"area": pgtx.Typed{V: "default", Type: "text"}}},
+		{"interface", id, pgtx.Args{"interface": id}},
+	} {
+		if got := sessionArgs(c.name, c.v); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%s %q: %#v, want %#v", c.name, c.v, got, c.want)
+		}
 	}
 }

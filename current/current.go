@@ -10,11 +10,13 @@ package current
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"time"
 
 	platform "github.com/apostoldevel/go-platform"
+	"github.com/apostoldevel/go-platform/lib/pgtx"
 	"github.com/apostoldevel/go-platform/lib/problem"
 	"github.com/apostoldevel/go-platform/lib/rest"
 	"github.com/jackc/pgx/v5"
@@ -36,13 +38,29 @@ type module struct {
 
 const prefix = "/api/v2/me"
 
-// meSQL is the seven v1 reads as one row.
-const meSQL = `SELECT json_build_object(
-  'user',      (SELECT row_to_json(u) FROM api.current_user() u),
-  'area',      (SELECT row_to_json(a) FROM api.current_area() a),
-  'interface', (SELECT row_to_json(i) FROM api.current_interface() i),
-  'locale',    (SELECT row_to_json(l) FROM api.current_locale() l),
-  'oper_date', api.oper_date())`
+// readMe is the v1 reads as one object: user, area, interface, locale — the
+// first row of api.current_<x>() or null — and the scalar oper_date.
+func readMe(ctx context.Context, tx pgx.Tx) (json.RawMessage, error) {
+	out := map[string]json.RawMessage{}
+	for _, k := range []string{"user", "area", "interface", "locale"} {
+		row, err := pgtx.CallRow(ctx, tx, "current_"+k, nil)
+		if errors.Is(err, pgtx.ErrNoRow) || (err == nil && row == nil) {
+			row = json.RawMessage("null")
+		} else if err != nil {
+			return nil, err
+		}
+		out[k] = row
+	}
+	od, err := pgtx.CallRow(ctx, tx, "oper_date", nil)
+	if err != nil {
+		return nil, err
+	}
+	if od == nil {
+		od = json.RawMessage("null")
+	}
+	out["oper_date"] = od
+	return json.Marshal(out)
+}
 
 // body is what PATCH /me may set. area, interface and locale take a uuid or
 // a code (the api.* overloads); oper_date is RFC 3339, null clears it.
@@ -54,11 +72,26 @@ type body struct {
 }
 
 // castOf picks the api.set_session_<x> overload by the value's shape.
-func castOf(v string) string {
-	if rest.IsUUID(v) {
-		return "::uuid"
+// sessionArgs are the arguments of api.set_session_<name>: a uuid or a code.
+// locale names them apart (pLocale uuid | pCode text); area has one name for
+// both, so the type is pinned; interface takes a uuid only (a code is refused
+// before the database, see patch).
+func sessionArgs(name, v string) pgtx.Args {
+	isID := rest.IsUUID(v)
+	if name == "locale" {
+		if isID {
+			return pgtx.Args{"locale": v}
+		}
+		return pgtx.Args{"code": v}
 	}
-	return "::text"
+	if name == "interface" {
+		return pgtx.Args{"interface": v}
+	}
+	t := "text"
+	if isID {
+		t = "uuid"
+	}
+	return pgtx.Args{name: pgtx.Typed{V: v, Type: t}}
 }
 
 // New returns the package as a platform.Module.
@@ -81,7 +114,9 @@ func (m *module) Routes(mux *http.ServeMux) {
 func (m *module) get(w http.ResponseWriter, r *http.Request) {
 	var row json.RawMessage
 	if err := m.cfg.Doer.Do(r.Context(), platform.SessionOf(r), rest.ReqOf(r, 200, nil), func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, meSQL).Scan(&row)
+		var err error
+		row, err = readMe(ctx, tx)
+		return err
 	}); err != nil {
 		rest.Fail(w, r, m.log, err)
 		return
@@ -117,6 +152,11 @@ func (m *module) patch(w http.ResponseWriter, r *http.Request) {
 			rest.Fail(w, r, m.log, problem.New(400, "validation", "Bad request", f.name+" must not be empty"))
 			return
 		}
+		// api.set_session_interface takes a uuid only: a code would be 42883
+		if f.name == "interface" && f.v != nil && !rest.IsUUID(*f.v) {
+			rest.Fail(w, r, m.log, problem.New(400, "validation", "Bad request", "interface must be a UUID"))
+			return
+		}
 	}
 	if hasOperDate && string(b.OperDate) != "null" {
 		var ts time.Time
@@ -136,16 +176,18 @@ func (m *module) patch(w http.ResponseWriter, r *http.Request) {
 			if f.v == nil {
 				continue
 			}
-			if _, err := tx.Exec(ctx, "SELECT api.set_session_"+f.name+"($1"+castOf(*f.v)+")", *f.v); err != nil {
+			if _, err := pgtx.Call(ctx, tx, "set_session_"+f.name, sessionArgs(f.name, *f.v)); err != nil {
 				return err
 			}
 		}
 		if hasOperDate {
-			if _, err := tx.Exec(ctx, "SELECT api.set_session_oper_date($1::timestamptz)", operDate); err != nil {
+			if _, err := pgtx.Call(ctx, tx, "set_session_oper_date", pgtx.Args{"operdate": pgtx.Typed{V: operDate, Type: "timestamptz"}}); err != nil {
 				return err
 			}
 		}
-		return tx.QueryRow(ctx, meSQL).Scan(&row)
+		var err error
+		row, err = readMe(ctx, tx)
+		return err
 	})
 	if err != nil {
 		rest.Fail(w, r, m.log, err)

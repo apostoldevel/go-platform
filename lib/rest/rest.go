@@ -165,6 +165,9 @@ func Project(row json.RawMessage, fields []string) json.RawMessage {
 }
 
 // Rows collects row_to_json rows of a query.
+//
+// Deprecated: text of SQL does not pass under the daemon role — use
+// pgtx.Call; kept until the projects on go-platform have moved.
 func Rows(ctx context.Context, tx pgx.Tx, sql string, args ...any) ([]json.RawMessage, error) {
 	rows, err := tx.Query(ctx, sql, args...)
 	if err != nil {
@@ -184,12 +187,16 @@ func Rows(ctx context.Context, tx pgx.Tx, sql string, args ...any) ([]json.RawMe
 
 // RowsHandler answers a whole row_to_json query as a JSON array — the v1
 // branches that read a view or a set-returning function with no paging.
+//
+// Deprecated: use CallRowsHandler.
 func RowsHandler(d Doer, log *slog.Logger, sql string, args ...any) http.HandlerFunc {
 	return RowsOf(d, log, sql, func(*http.Request) ([]any, error) { return args, nil })
 }
 
 // RowsOf is RowsHandler with the arguments decided from the request — its
 // error is answered as is, before the database.
+//
+// Deprecated: use CallRowsOf.
 func RowsOf(d Doer, log *slog.Logger, sql string, args func(*http.Request) ([]any, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		a, err := args(r)
@@ -211,11 +218,72 @@ func RowsOf(d Doer, log *slog.Logger, sql string, args func(*http.Request) ([]an
 	}
 }
 
+// CallRowsHandler answers every row of one api.* function as a JSON array —
+// the v1 branches that read a set-returning function with no paging.
+func CallRowsHandler(d Doer, log *slog.Logger, fn string, args pgtx.Args) http.HandlerFunc {
+	return CallRowsOf(d, log, fn, func(*http.Request) (pgtx.Args, error) { return args, nil })
+}
+
+// CallRowsOf is CallRowsHandler with the arguments decided from the request
+// — its error is answered as is, before the database.
+func CallRowsOf(d Doer, log *slog.Logger, fn string, args func(*http.Request) (pgtx.Args, error)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		a, err := args(r)
+		if err != nil {
+			Fail(w, r, log, err)
+			return
+		}
+		var rows []json.RawMessage
+		err = d.Do(r.Context(), platform.SessionOf(r), ReqOf(r, 200, nil), func(ctx context.Context, tx pgx.Tx) (err error) {
+			rows, err = pgtx.Call(ctx, tx, fn, a)
+			return err
+		})
+		if err != nil {
+			Fail(w, r, log, err)
+			return
+		}
+		body, _ := json.Marshal(rows)
+		WriteJSON(w, 200, body)
+	}
+}
+
+// CallRowHandler answers one row of an api.* function keyed by the request —
+// a lookup by something other than the id (a catalogue code, path elements):
+// args decides the arguments (its error is answered as is), no row is 404,
+// the row carries an ETag and honours If-None-Match as Get does.
+func CallRowHandler(d Doer, log *slog.Logger, fn string, args func(*http.Request) (pgtx.Args, error)) http.HandlerFunc {
+	return rowHandler(d, log, args, func(ctx context.Context, tx pgx.Tx, a pgtx.Args) (json.RawMessage, error) {
+		return pgtx.CallRow(ctx, tx, fn, a)
+	})
+}
+
 // RowHandler answers one row of an api.* query keyed by the request — a
 // lookup by something other than the id (a catalogue code, path elements):
 // args decides the arguments (its error is answered as is), no row is 404,
 // the row carries an ETag and honours If-None-Match as Get does.
+//
+// Deprecated: use CallRowHandler.
 func RowHandler(d Doer, log *slog.Logger, sql string, args func(*http.Request) ([]any, error)) http.HandlerFunc {
+	return rowHandler(d, log, args, func(ctx context.Context, tx pgx.Tx, a []any) (json.RawMessage, error) {
+		var row json.RawMessage
+		err := tx.QueryRow(ctx, sql, a...).Scan(&row)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, pgtx.ErrNoRow
+		}
+		return row, err
+	})
+}
+
+// RowFunc is the one-row answer over any read — a call whose row is shaped
+// in Go (a scalar wrapped into an object, a projection): pgtx.ErrNoRow is
+// 404, the row carries an ETag and honours If-None-Match.
+func RowFunc(d Doer, log *slog.Logger, args func(*http.Request) (pgtx.Args, error), read func(context.Context, pgx.Tx, pgtx.Args) (json.RawMessage, error)) http.HandlerFunc {
+	return rowHandler(d, log, args, read)
+}
+
+// rowHandler is the one-row answer of RowHandler and CallRowHandler: no row
+// is 404, the row carries an ETag and honours If-None-Match.
+func rowHandler[A any](d Doer, log *slog.Logger, args func(*http.Request) (A, error), read func(context.Context, pgx.Tx, A) (json.RawMessage, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		a, err := args(r)
 		if err != nil {
@@ -225,7 +293,8 @@ func RowHandler(d Doer, log *slog.Logger, sql string, args func(*http.Request) (
 		var row json.RawMessage
 		req := ReqOf(r, 200, nil)
 		if err := d.Do(r.Context(), platform.SessionOf(r), req, func(ctx context.Context, tx pgx.Tx) error {
-			if err := tx.QueryRow(ctx, sql, a...).Scan(&row); errors.Is(err, pgx.ErrNoRows) {
+			var err error
+			if row, err = read(ctx, tx, a); errors.Is(err, pgtx.ErrNoRow) {
 				return problem.New(404, "not-found", "Not found", "")
 			} else if err != nil {
 				return err
@@ -250,13 +319,8 @@ func RowHandler(d Doer, log *slog.Logger, sql string, args func(*http.Request) (
 // GetRow is one row of Get by id; no row is 404 — RLS does not distinguish
 // "no such object" from "no rights", neither does the answer.
 func (res Resource) GetRow(ctx context.Context, tx pgx.Tx, id any) (json.RawMessage, error) {
-	cast := "$1::uuid"
-	if res.IntID {
-		cast = "$1::bigint"
-	}
-	var row json.RawMessage
-	err := tx.QueryRow(ctx, "SELECT row_to_json(t) FROM "+res.GetFn+"("+cast+") t", id).Scan(&row)
-	if errors.Is(err, pgx.ErrNoRows) {
+	row, err := pgtx.CallRow(ctx, tx, res.GetFn, pgtx.Args{"id": id})
+	if errors.Is(err, pgtx.ErrNoRow) {
 		return nil, problem.New(404, "not-found", "Not found", "")
 	}
 	return row, err
@@ -276,10 +340,10 @@ func (res Resource) List(d Doer, log *slog.Logger) http.HandlerFunc {
 		var total int64
 		qp, _ := json.Marshal(map[string]any{"query": r.URL.RawQuery})
 		err = d.Do(r.Context(), platform.SessionOf(r), ReqOf(r, 200, qp), func(ctx context.Context, tx pgx.Tx) error {
-			if err := tx.QueryRow(ctx, "SELECT "+res.CountFn+"($1)", search).Scan(&total); err != nil {
+			if err := pgtx.CallScalar(ctx, tx, res.CountFn, pgtx.Args{"search": pgtx.JSON(search)}, &total); err != nil {
 				return err
 			}
-			rows, err := Rows(ctx, tx, "SELECT row_to_json(t) FROM "+res.ListFn+"($1, NULL, $2, $3, $4) t", search, params.Limit, params.Offset, orderby)
+			rows, err := pgtx.Call(ctx, tx, res.ListFn, pgtx.Args{"search": pgtx.JSON(search), "limit": params.Limit, "offset": params.Offset, "orderby": pgtx.JSON(orderby)})
 			if err != nil {
 				return err
 			}

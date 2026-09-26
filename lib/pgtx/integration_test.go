@@ -420,3 +420,62 @@ func TestIntegration_RaisedRefusalIsJournalled(t *testing.T) {
 		t.Fatalf("row: error %q, the refusal was %v", request.Error, p.Code)
 	}
 }
+
+// Call is daemon.call's semantics over the direct call: an absent key
+// is the parameter's DEFAULT, a nil is an explicit NULL; a composite row is
+// an object, a scalar its value; a Typed value picks the overload a name
+// alone does not.
+func TestIntegration_CallSemantics(t *testing.T) {
+	dsn, mint := env(t)
+	r := runner(t, dsn)
+	err := r.Do(context.Background(), pgtx.Session{Code: mint(t), Agent: "go-test", Host: "127.0.0.1"}, nil, func(ctx context.Context, tx pgx.Tx) error {
+		var me string
+		if err := pgtx.CallScalar(ctx, tx, "current_userid", nil, &me); err != nil || me == "" {
+			t.Fatalf("scalar: %q %v", me, err)
+		}
+		// get_user(pid DEFAULT current_userid()): no key — the caller's own row
+		row, err := pgtx.CallRow(ctx, tx, "api.get_user", nil)
+		if err != nil {
+			t.Fatalf("absent key: %v", err)
+		}
+		var u struct {
+			ID *string `json:"id"`
+		}
+		if json.Unmarshal(row, &u) != nil || u.ID == nil || *u.ID != me {
+			t.Fatalf("absent key must be the DEFAULT (the caller): %s", row)
+		}
+		// an explicit null is NULL, not the DEFAULT
+		rows, err := pgtx.Call(ctx, tx, "get_user", pgtx.Args{"id": nil})
+		if err != nil {
+			t.Fatalf("null: %v", err)
+		}
+		for _, r := range rows {
+			if json.Unmarshal(r, &u) == nil && u.ID != nil {
+				t.Fatalf("an explicit null must not fall back to the DEFAULT: %s", r)
+			}
+		}
+		// jsonb as a JSON value; a list is one object per row
+		list, err := pgtx.Call(ctx, tx, "list_error", pgtx.Args{"search": json.RawMessage(`[{"field":"code","compare":"EQL","value":"` + problem.CodeLoginFailed + `"}]`), "limit": 5})
+		if err != nil || len(list) != 1 || !strings.Contains(string(list[0]), problem.CodeLoginFailed) {
+			t.Fatalf("list with a jsonb search: %d rows %v", len(list), err)
+		}
+		// is_user_role(uuid | text): the name alone picks text; Typed picks uuid
+		var admin bool
+		if err := pgtx.CallScalar(ctx, tx, "is_user_role", pgtx.Args{"role": pgtx.Typed{V: "00000000-0000-4000-a000-000000000000", Type: "uuid"}}, &admin); err != nil {
+			t.Fatalf("typed overload: %v", err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// an unknown function is the database's refusal, in a transaction of its own
+	err = r.Do(context.Background(), pgtx.Session{Code: mint(t), Agent: "go-test", Host: "127.0.0.1"}, nil, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := pgtx.Call(ctx, tx, "no_such_function_of_the_test", nil)
+		return err
+	})
+	var p *problem.Problem
+	if !errors.As(err, &p) {
+		t.Fatalf("an unknown function must be refused as a problem: %v", err)
+	}
+}

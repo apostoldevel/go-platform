@@ -6,6 +6,8 @@
 package kladr
 
 import (
+	"context"
+	"encoding/json"
 	"log/slog"
 	"math"
 	"net/http"
@@ -13,8 +15,10 @@ import (
 	"strconv"
 
 	platform "github.com/apostoldevel/go-platform"
+	"github.com/apostoldevel/go-platform/lib/pgtx"
 	"github.com/apostoldevel/go-platform/lib/problem"
 	"github.com/apostoldevel/go-platform/lib/rest"
+	"github.com/jackc/pgx/v5"
 )
 
 // Doer runs the request transaction (pgtx.Runner in production).
@@ -38,7 +42,7 @@ var nodes = rest.Resource{Prefix: "/api/v2/kladr", ListFn: "api.list_address_tre
 // codeRe is a KLADR code: digits only.
 var codeRe = regexp.MustCompile(`^[0-9]{1,20}$`)
 
-func idOf(r *http.Request) ([]any, error) {
+func idOf(r *http.Request) (pgtx.Args, error) {
 	id, err := rest.IntIDOf(r)
 	if err != nil {
 		return nil, err
@@ -46,7 +50,7 @@ func idOf(r *http.Request) ([]any, error) {
 	if id > math.MaxInt32 {
 		return nil, problem.New(400, "validation", "Bad request", "id is out of range")
 	}
-	return []any{int32(id)}, nil
+	return pgtx.Args{"id": int32(id)}, nil
 }
 
 // intParam reads a non-negative integer query parameter, absent is 0.
@@ -78,14 +82,21 @@ func (m *module) Routes(mux *http.ServeMux) {
 	d, log := m.cfg.Doer, m.log
 	p := nodes.Prefix
 	mux.HandleFunc("GET "+p, nodes.List(d, log))
-	mux.HandleFunc("GET "+p+"/{id}", rest.RowHandler(d, log, "SELECT row_to_json(t) FROM api.get_address_tree($1::integer) t", idOf))
-	mux.HandleFunc("GET "+p+"/{id}/history", rest.RowsOf(d, log, "SELECT row_to_json(t) FROM api.get_address_tree_history($1::integer) t", idOf))
-	// string is a query, not an id: the code is a KLADR code, not a row
-	mux.HandleFunc("GET "+p+"/string", rest.RowHandler(d, log, "SELECT json_build_object('address', api.get_address_tree_string($1, $2::integer, $3::integer))", stringArgs))
+	mux.HandleFunc("GET "+p+"/{id}", rest.CallRowHandler(d, log, "get_address_tree", idOf))
+	mux.HandleFunc("GET "+p+"/{id}/history", rest.CallRowsOf(d, log, "get_address_tree_history", idOf))
+	// string is a query, not an id: the code is a KLADR code, not a row; the
+	// scalar is answered as {"address": …}
+	mux.HandleFunc("GET "+p+"/string", rest.RowFunc(d, log, stringArgs, func(ctx context.Context, tx pgx.Tx, a pgtx.Args) (json.RawMessage, error) {
+		var address *string
+		if err := pgtx.CallScalar(ctx, tx, "get_address_tree_string", a, &address); err != nil {
+			return nil, err
+		}
+		return json.Marshal(map[string]*string{"address": address})
+	}))
 }
 
 // stringArgs is ?code=&short=&level= of /string.
-func stringArgs(r *http.Request) ([]any, error) {
+func stringArgs(r *http.Request) (pgtx.Args, error) {
 	code := r.URL.Query().Get("code")
 	if !codeRe.MatchString(code) {
 		return nil, problem.New(400, "validation", "Bad request", "code must be a KLADR code")
@@ -98,5 +109,5 @@ func stringArgs(r *http.Request) ([]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return []any{code, short, level}, nil
+	return pgtx.Args{"code": code, "short": short, "level": level}, nil
 }

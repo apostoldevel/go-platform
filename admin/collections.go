@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	platform "github.com/apostoldevel/go-platform"
+	"github.com/apostoldevel/go-platform/lib/pgtx"
 	"github.com/apostoldevel/go-platform/lib/problem"
 	"github.com/apostoldevel/go-platform/lib/rest"
 	"github.com/jackc/pgx/v5"
@@ -14,50 +15,46 @@ import (
 // collection is one of the admin module's "named things users belong to":
 // groups, areas, interfaces — api.set_<x>/delete_<x> and the members
 // api.<x>_member / <x>_member_add / <x>_member_delete. The SQL of add and
-// delete is spelled out per collection because one of them differs:
-// api.interface_member_add takes (member, interface), every other add and
-// every delete takes (collection, member).
+// delete name their parameters differently per collection (pGroupId,
+// pArea, pInterface …): each call is spelled out as a function and the key
+// of the collection's id in it; the member is always "member".
 type collection struct {
 	rest.Writable
-	membersFn string
-	addSQL    string // $1 = collection id, $2 = user id
-	delSQL    string
+	membersFn, membersKey string // api.group_member(pGroupId)
+	addFn, delFn, key     string // api.group_member_add(pGroup, pMember)
 }
 
 var groups = collection{
 	Writable: rest.Writable{
 		Resource: rest.Resource{Prefix: "/api/v2/groups", GetFn: "api.get_group", ListFn: "api.list_group", CountFn: "api.count_group"},
-		SetSQL:   "SELECT row_to_json(t) FROM api.set_group($1::uuid, $2, $3, $4) t",
+		SetFn:    "api.set_group",
 		NewBody:  func() rest.Body { return &groupBody{} },
 		DeleteFn: "api.delete_group",
 	},
-	membersFn: "api.group_member",
-	addSQL:    "SELECT api.group_member_add($1::uuid, $2::uuid)",
-	delSQL:    "SELECT api.group_member_delete($1::uuid, $2::uuid)",
+	membersFn: "api.group_member", membersKey: "groupid",
+	addFn: "api.group_member_add", delFn: "api.group_member_delete", key: "group",
 }
 
 var areas = collection{
 	Writable: rest.Writable{
 		Resource: rest.Resource{Prefix: "/api/v2/areas", GetFn: "api.get_area", ListFn: "api.list_area", CountFn: "api.count_area"},
-		SetSQL:   "SELECT row_to_json(t) FROM api.set_area($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6, $7, $8::integer, $9::timestamptz, $10::timestamptz) t",
+		SetFn:    "api.set_area",
 		NewBody:  func() rest.Body { return &areaBody{} },
 		DeleteFn: "api.delete_area",
 	},
-	membersFn: "api.area_member",
-	addSQL:    "SELECT api.area_member_add($1::uuid, $2::uuid)",
-	delSQL:    "SELECT api.area_member_delete($1::uuid, $2::uuid)",
+	membersFn: "api.area_member", membersKey: "areaid",
+	addFn: "api.area_member_add", delFn: "api.area_member_delete", key: "area",
 }
 
 var interfaces = collection{
 	Writable: rest.Writable{
 		Resource: rest.Resource{Prefix: "/api/v2/interfaces", GetFn: "api.get_interface", ListFn: "api.list_interface", CountFn: "api.count_interface"},
-		SetSQL:   "SELECT row_to_json(t) FROM api.set_interface($1::uuid, $2, $3, $4) t",
+		SetFn:    "api.set_interface",
 		NewBody:  func() rest.Body { return &interfaceBody{} },
 		DeleteFn: "api.delete_interface",
 	},
-	membersFn: "api.interface_member",
-	addSQL:    "SELECT api.interface_member_add($2::uuid, $1::uuid)", // (member, interface)
-	delSQL:    "SELECT api.interface_member_delete($1::uuid, $2::uuid)",
+	membersFn: "api.interface_member", membersKey: "interfaceid",
+	addFn: "api.interface_member_add", delFn: "api.interface_member_delete", key: "interface",
 }
 
 // areaTypes is the view api.area_type (v1 /admin/area/type); sessions is
@@ -77,7 +74,9 @@ type groupBody struct {
 }
 
 func (b *groupBody) Validate(create bool) error { return rest.Required("username", b.Username, create) }
-func (b *groupBody) Args(id any) []any          { return []any{id, b.Username, b.Name, b.Description} }
+func (b *groupBody) Args(id any) pgtx.Args {
+	return pgtx.Args{"id": id, "username": b.Username, "name": b.Name, "description": b.Description}
+}
 
 type areaBody struct {
 	Parent        *string `json:"parent"`
@@ -92,8 +91,8 @@ type areaBody struct {
 }
 
 func (b *areaBody) Validate(create bool) error { return rest.Required("code", b.Code, create) }
-func (b *areaBody) Args(id any) []any {
-	return []any{id, b.Parent, b.Type, b.Scope, b.Code, b.Name, b.Description, b.Sequence, b.ValidFromDate, b.ValidToDate}
+func (b *areaBody) Args(id any) pgtx.Args {
+	return pgtx.Args{"id": id, "parent": b.Parent, "type": b.Type, "scope": b.Scope, "code": b.Code, "name": b.Name, "description": b.Description, "sequence": b.Sequence, "validfromdate": b.ValidFromDate, "validtodate": b.ValidToDate}
 }
 
 type interfaceBody struct {
@@ -103,7 +102,9 @@ type interfaceBody struct {
 }
 
 func (b *interfaceBody) Validate(create bool) error { return rest.Required("code", b.Code, create) }
-func (b *interfaceBody) Args(id any) []any          { return []any{id, b.Code, b.Name, b.Description} }
+func (b *interfaceBody) Args(id any) pgtx.Args {
+	return pgtx.Args{"id": id, "code": b.Code, "name": b.Name, "description": b.Description}
+}
 
 func (m *module) collectionRoutes(mux *http.ServeMux) {
 	for _, c := range []collection{groups, areas, interfaces} {
@@ -132,7 +133,7 @@ func (m *module) membersList(c collection) http.HandlerFunc {
 			if _, err := c.GetRow(ctx, tx, id); err != nil {
 				return err
 			}
-			rows, err = rest.Rows(ctx, tx, "SELECT row_to_json(t) FROM "+c.membersFn+"($1::uuid) t", id)
+			rows, err = pgtx.Call(ctx, tx, c.membersFn, pgtx.Args{c.membersKey: id})
 			return err
 		})
 		if err != nil {
@@ -164,7 +165,7 @@ func (m *module) membersAdd(c collection) http.HandlerFunc {
 			return
 		}
 		if err := m.cfg.Doer.Do(r.Context(), platform.SessionOf(r), rest.ReqOf(r, 204, raw), func(ctx context.Context, tx pgx.Tx) error {
-			_, err := tx.Exec(ctx, c.addSQL, id, b.ID)
+			_, err := pgtx.Call(ctx, tx, c.addFn, pgtx.Args{c.key: id, "member": b.ID})
 			return err
 		}); err != nil {
 			rest.Fail(w, r, m.log, err)
@@ -187,7 +188,7 @@ func (m *module) membersDelete(c collection) http.HandlerFunc {
 			return
 		}
 		if err := m.cfg.Doer.Do(r.Context(), platform.SessionOf(r), rest.ReqOf(r, 204, nil), func(ctx context.Context, tx pgx.Tx) error {
-			_, err := tx.Exec(ctx, c.delSQL, id, uid)
+			_, err := pgtx.Call(ctx, tx, c.delFn, pgtx.Args{c.key: id, "member": uid})
 			return err
 		}); err != nil {
 			rest.Fail(w, r, m.log, err)
@@ -214,7 +215,7 @@ func (m *module) areaAction(w http.ResponseWriter, r *http.Request) {
 		if _, err := areas.GetRow(ctx, tx, id); err != nil {
 			return err
 		}
-		return tx.QueryRow(ctx, "SELECT api.safely_delete_area($1::uuid)", id).Scan(&deleted)
+		return pgtx.CallScalar(ctx, tx, "safely_delete_area", pgtx.Args{"id": id}, &deleted)
 	})
 	if err != nil {
 		rest.Fail(w, r, m.log, err)
@@ -229,7 +230,7 @@ func (m *module) areaAction(w http.ResponseWriter, r *http.Request) {
 func (m *module) areasClear(w http.ResponseWriter, r *http.Request) {
 	var n int
 	err := m.cfg.Doer.Do(r.Context(), platform.SessionOf(r), rest.ReqOf(r, 200, nil), func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, "SELECT api.clear_area()").Scan(&n)
+		return pgtx.CallScalar(ctx, tx, "clear_area", nil, &n)
 	})
 	if err != nil {
 		rest.Fail(w, r, m.log, err)

@@ -9,13 +9,17 @@
 package observer
 
 import (
+	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"regexp"
 
 	platform "github.com/apostoldevel/go-platform"
+	"github.com/apostoldevel/go-platform/lib/pgtx"
 	"github.com/apostoldevel/go-platform/lib/problem"
 	"github.com/apostoldevel/go-platform/lib/rest"
+	"github.com/jackc/pgx/v5"
 )
 
 // Doer runs the request transaction (pgtx.Runner in production).
@@ -63,27 +67,78 @@ func (m *module) Prefixes() []string { return []string{prefix} }
 // Routes registers the publishers and the caller's listeners on the mux.
 func (m *module) Routes(mux *http.ServeMux) {
 	d, log := m.cfg.Doer, m.log
-	mux.HandleFunc("GET "+publishers, rest.RowsHandler(d, log, "SELECT row_to_json(t) FROM api.publisher t ORDER BY code"))
-	mux.HandleFunc("GET "+publishers+"/{code}", rest.RowHandler(d, log,
-		"SELECT row_to_json(t) FROM api.get_publisher($1) t", func(r *http.Request) ([]any, error) {
-			code, err := codeOf(r, "code")
-			return []any{code}, err
-		}))
-	// the session is the caller's, taken from the request, never from the path
-	const listener = "json_build_object('publisher', publisher, 'identity', identity, 'filter', filter, 'params', params)"
+	mux.HandleFunc("GET "+publishers, rest.CallRowsHandler(d, log, "list_publisher", pgtx.Args{"orderby": json.RawMessage(`["code ASC"]`), "limit": 0}))
+	mux.HandleFunc("GET "+publishers+"/{code}", rest.CallRowHandler(d, log, "get_publisher", func(r *http.Request) (pgtx.Args, error) {
+		code, err := codeOf(r, "code")
+		return pgtx.Args{"code": code}, err
+	}))
+	// the session is the caller's, taken from the request, never from the
+	// path. The filter by the caller's session is Go's here (api.listener has
+	// none, and carries the session code) until the database gives a list of
+	// the caller's own listeners; the session column is never answered, and
+	// an empty session reads nothing (the search language drops an empty value).
 	mux.HandleFunc("GET "+prefix+"/listeners", func(w http.ResponseWriter, r *http.Request) {
-		rest.RowsHandler(d, log, "SELECT "+listener+" FROM api.listener WHERE session = $1 ORDER BY publisher, identity", platform.SessionOf(r).Code)(w, r)
+		code := platform.SessionOf(r).Code
+		if code == "" {
+			rest.WriteJSON(w, 200, []byte("[]"))
+			return
+		}
+		search, _ := json.Marshal([]map[string]any{{"field": "session", "compare": "EQL", "value": code}})
+		var rows []json.RawMessage
+		err := d.Do(r.Context(), platform.SessionOf(r), rest.ReqOf(r, 200, nil), func(ctx context.Context, tx pgx.Tx) (err error) {
+			rows, err = pgtx.Call(ctx, tx, "list_listener", pgtx.Args{"search": json.RawMessage(search), "orderby": json.RawMessage(`["publisher ASC","identity ASC"]`), "limit": 0})
+			return err
+		})
+		if err != nil {
+			rest.Fail(w, r, log, err)
+			return
+		}
+		for i, row := range rows {
+			if rows[i], err = listenerOf(row); err != nil {
+				rest.Fail(w, r, log, err)
+				return
+			}
+		}
+		body, _ := json.Marshal(rows)
+		rest.WriteJSON(w, 200, body)
 	})
-	mux.HandleFunc("GET "+prefix+"/listeners/{publisher}/{identity}", rest.RowHandler(d, log,
-		"SELECT "+listener+" FROM api.get_listener($1, $2, $3)", func(r *http.Request) ([]any, error) {
-			publisher, err := codeOf(r, "publisher")
-			if err != nil {
-				return nil, err
-			}
-			identity, err := codeOf(r, "identity")
-			if err != nil {
-				return nil, err
-			}
-			return []any{publisher, platform.SessionOf(r).Code, identity}, nil
-		}))
+	mux.HandleFunc("GET "+prefix+"/listeners/{publisher}/{identity}", rest.RowFunc(d, log, func(r *http.Request) (pgtx.Args, error) {
+		publisher, err := codeOf(r, "publisher")
+		if err != nil {
+			return nil, err
+		}
+		identity, err := codeOf(r, "identity")
+		if err != nil {
+			return nil, err
+		}
+		return pgtx.Args{"publisher": publisher, "session": platform.SessionOf(r).Code, "identity": identity}, nil
+	}, func(ctx context.Context, tx pgx.Tx, a pgtx.Args) (json.RawMessage, error) {
+		row, err := pgtx.CallRow(ctx, tx, "get_listener", a)
+		if err != nil {
+			return nil, err
+		}
+		return listenerOf(row)
+	}))
+}
+
+// listenerOf is the listener as the API answers it: publisher, identity,
+// filter, params — the session code never leaves the database's row.
+func listenerOf(row json.RawMessage) (json.RawMessage, error) {
+	var l struct {
+		Publisher json.RawMessage `json:"publisher"`
+		Identity  json.RawMessage `json:"identity"`
+		Filter    json.RawMessage `json:"filter"`
+		Params    json.RawMessage `json:"params"`
+	}
+	if err := json.Unmarshal(row, &l); err != nil {
+		return nil, err // never the row itself: it carries the session code
+	}
+	null := json.RawMessage("null")
+	orNull := func(v json.RawMessage) json.RawMessage {
+		if v == nil {
+			return null
+		}
+		return v
+	}
+	return json.Marshal(map[string]json.RawMessage{"publisher": orNull(l.Publisher), "identity": orNull(l.Identity), "filter": orNull(l.Filter), "params": orNull(l.Params)})
 }

@@ -8,6 +8,7 @@ import (
 	"strconv"
 
 	platform "github.com/apostoldevel/go-platform"
+	"github.com/apostoldevel/go-platform/lib/pgtx"
 	"github.com/apostoldevel/go-platform/lib/problem"
 	"github.com/jackc/pgx/v5"
 )
@@ -88,7 +89,7 @@ func (a Access) Routes(mux *http.ServeMux, d Doer, log *slog.Logger) {
 			if _, err := res.GetRow(ctx, tx, id); err != nil {
 				return err
 			}
-			rows, err = Rows(ctx, tx, "SELECT row_to_json(t) FROM "+listFn+"($1::uuid) t", id)
+			rows, err = pgtx.Call(ctx, tx, listFn, pgtx.Args{"id": id})
 			return err
 		})
 		if err != nil {
@@ -124,7 +125,7 @@ func (a Access) Routes(mux *http.ServeMux, d Doer, log *slog.Logger) {
 			if err := set(ctx, tx, id, b); err != nil {
 				return err
 			}
-			rows, err = Rows(ctx, tx, "SELECT row_to_json(t) FROM "+listFn+"($1::uuid) t", id)
+			rows, err = pgtx.Call(ctx, tx, listFn, pgtx.Args{"id": id})
 			return err
 		})
 		if err != nil {
@@ -153,7 +154,13 @@ func (a Access) Routes(mux *http.ServeMux, d Doer, log *slog.Logger) {
 			if _, err := res.GetRow(ctx, tx, id); err != nil {
 				return err
 			}
-			return tx.QueryRow(ctx, "SELECT row_to_json(t) FROM "+decodeFn+"($1::uuid, coalesce($2::uuid, api.current_userid())) t", id, user).Scan(&row)
+			// no userid: the key is left out, and the parameter's DEFAULT is current_userid()
+			args := pgtx.Args{"id": id}
+			if user != nil {
+				args["userid"] = *user
+			}
+			row, err = pgtx.CallRow(ctx, tx, decodeFn, args)
+			return err
 		})
 		if err != nil {
 			Fail(w, r, log, err)

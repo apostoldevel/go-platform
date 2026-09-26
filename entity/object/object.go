@@ -27,6 +27,7 @@ import (
 	"strings"
 
 	platform "github.com/apostoldevel/go-platform"
+	"github.com/apostoldevel/go-platform/lib/pgtx"
 	"github.com/apostoldevel/go-platform/lib/problem"
 	"github.com/apostoldevel/go-platform/lib/query"
 	"github.com/apostoldevel/go-platform/lib/rest"
@@ -90,8 +91,8 @@ func (m *module) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET "+p, objects.List(d, log))
 	mux.HandleFunc("GET "+p+"/{id}", objects.Get(d, log))
 	mux.HandleFunc("GET "+p+"/{id}/methods", m.methods)
-	mux.HandleFunc("POST "+p+"/{id}/actions/{action}", m.run("action", codeRe.MatchString, "SELECT api.execute_object_action($1::uuid, $2, $3::jsonb)"))
-	mux.HandleFunc("POST "+p+"/{id}/methods/{method}", m.run("method", rest.IsUUID, "SELECT api.execute_method($1::uuid, $2::uuid, $3::jsonb)"))
+	mux.HandleFunc("POST "+p+"/{id}/actions/{action}", m.run("action", codeRe.MatchString, "execute_object_action", "code"))
+	mux.HandleFunc("POST "+p+"/{id}/methods/{method}", m.run("method", rest.IsUUID, "execute_method", "method"))
 	rest.Access{Resource: objects, ListFn: "api.object_access", DecodeFn: "api.decode_object_access", MaxMask: rest.MaskBits6, Set: chmodo}.Routes(mux, d, log)
 	mux.HandleFunc("GET "+p+"/{id}/files", m.files)
 	mux.HandleFunc("POST "+p+"/{id}/files", m.filesAdd)
@@ -104,7 +105,7 @@ func (m *module) Routes(mux *http.ServeMux) {
 // mask is six bits (deny/allow × s/u/d) — rest.Access bounds it before the
 // database, which would cast a wider number to bit(6) and wrap.
 func chmodo(ctx context.Context, tx pgx.Tx, id string, b rest.AccessBody) error {
-	_, err := tx.Exec(ctx, "SELECT api.chmodo($1::uuid, $2::int, $3::uuid)", id, *b.Mask, b.UserID)
+	_, err := pgtx.Call(ctx, tx, "chmodo", pgtx.Args{"object": id, "mask": *b.Mask, "userid": b.UserID})
 	return err
 }
 
@@ -133,10 +134,10 @@ func (m *module) files(w http.ResponseWriter, r *http.Request) {
 		if _, err := objects.GetRow(ctx, tx, id); err != nil {
 			return err
 		}
-		if err := tx.QueryRow(ctx, "SELECT api.count_object_file($1)", search).Scan(&total); err != nil {
+		if err := pgtx.CallScalar(ctx, tx, "count_object_file", pgtx.Args{"search": pgtx.JSON(search)}, &total); err != nil {
 			return err
 		}
-		rows, err := rest.Rows(ctx, tx, "SELECT row_to_json(t) FROM api.list_object_file($1, NULL, $2, $3, $4) t", search, params.Limit, params.Offset, orderby)
+		rows, err := pgtx.Call(ctx, tx, "list_object_file", pgtx.Args{"search": pgtx.JSON(search), "limit": params.Limit, "offset": params.Offset, "orderby": pgtx.JSON(orderby)})
 		if err != nil {
 			return err
 		}
@@ -227,7 +228,7 @@ func (m *module) filesAdd(w http.ResponseWriter, r *http.Request) {
 		if _, err := objects.GetRow(ctx, tx, id); err != nil {
 			return err
 		}
-		rows, err = rest.Rows(ctx, tx, "SELECT row_to_json(t) FROM api.set_object_files_json($1::uuid, $2::json) t", id, raw)
+		rows, err = pgtx.Call(ctx, tx, "set_object_files_json", pgtx.Args{"id": id, "files": pgtx.JSON(raw)})
 		return err
 	})
 	if err != nil {
@@ -269,8 +270,9 @@ func (m *module) file(w http.ResponseWriter, r *http.Request) {
 		if _, err := objects.GetRow(ctx, tx, id); err != nil {
 			return err
 		}
-		err := tx.QueryRow(ctx, "SELECT row_to_json(t) FROM api.get_object_file($1::uuid, $2::uuid, NULL, NULL) t", id, file).Scan(&row)
-		if errors.Is(err, pgx.ErrNoRows) {
+		var err error
+		row, err = pgtx.CallRow(ctx, tx, "get_object_file", pgtx.Args{"object": id, "file": file, "name": nil})
+		if errors.Is(err, pgtx.ErrNoRow) {
 			return problem.New(404, "not-found", "Not found", "")
 		}
 		return err
@@ -300,7 +302,7 @@ func (m *module) fileDelete(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		var deleted bool
-		if err := tx.QueryRow(ctx, "SELECT api.delete_object_file($1::uuid, $2::uuid, NULL, NULL)", id, file).Scan(&deleted); err != nil {
+		if err := pgtx.CallScalar(ctx, tx, "delete_object_file", pgtx.Args{"object": id, "file": file, "name": nil}, &deleted); err != nil {
 			return err
 		}
 		if !deleted {
@@ -328,7 +330,7 @@ func (m *module) filesClear(w http.ResponseWriter, r *http.Request) {
 		if _, err := objects.GetRow(ctx, tx, id); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx, "SELECT api.clear_object_files($1::uuid)", id)
+		_, err := pgtx.Call(ctx, tx, "clear_object_files", pgtx.Args{"id": id})
 		return err
 	})
 	if err != nil {
@@ -362,11 +364,12 @@ func (m *module) search(w http.ResponseWriter, r *http.Request) {
 	if len(entities) > 0 {
 		entitiesJSON, _ = json.Marshal(entities)
 	}
-	var locale *string
+	args := pgtx.Args{"text": text, "entities": pgtx.JSON(entitiesJSON)}
+	// no locale: the key is left out, and pLocaleCode's DEFAULT is the session's locale_code()
 	if l := q.Get("locale"); l != "" {
-		locale = &l
+		args["localecode"] = l
 	}
-	rest.RowsHandler(m.cfg.Doer, m.log, "SELECT row_to_json(t) FROM api.search($1, $2::jsonb, coalesce($3, (SELECT code FROM api.current_locale()))) t", text, entitiesJSON, locale)(w, r)
+	rest.CallRowsHandler(m.cfg.Doer, m.log, "search", args)(w, r)
 }
 
 // methods is GET /objects/{id}/methods: the methods of the object's state
@@ -382,7 +385,8 @@ func (m *module) methods(w http.ResponseWriter, r *http.Request) {
 		if _, err := objects.GetRow(ctx, tx, id); err != nil {
 			return err
 		}
-		items, err = rest.Rows(ctx, tx, "SELECT row_to_json(t) FROM api.get_object_methods($1::uuid) t ORDER BY t.sequence", id)
+		// api.get_object_methods ends in ORDER BY sequence, and the call keeps the order
+		items, err = pgtx.Call(ctx, tx, "get_object_methods", pgtx.Args{"object": id})
 		return err
 	})
 	if err != nil {
@@ -396,13 +400,17 @@ func (m *module) methods(w http.ResponseWriter, r *http.Request) {
 // run is POST /objects/{id}/actions/{action} or /methods/{method}: the
 // object must be visible (404), the action runs with the body as params
 // in the one transaction, and the object's row after it is the answer.
-func (m *module) run(what string, valid func(string) bool, sql string) http.HandlerFunc {
+// run calls fn(pObject, p<key>, pParams): execute_object_action by the
+// action's code, execute_method by the method's id — the parameter names
+// pick the overload (pCode / pMethod), not a cast.
+func (m *module) run(what string, valid func(string) bool, fn, key string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id, err := rest.IDOf(r)
 		if err != nil {
 			rest.Fail(w, r, m.log, err)
 			return
 		}
+		argKey := key
 		key := r.PathValue(what)
 		if !valid(key) {
 			rest.Fail(w, r, m.log, problem.New(400, "validation", "Bad request", "bad "+what))
@@ -418,11 +426,7 @@ func (m *module) run(what string, valid func(string) bool, sql string) http.Hand
 			if _, err := objects.GetRow(ctx, tx, id); err != nil {
 				return err
 			}
-			var p any
-			if params != nil {
-				p = params
-			}
-			if _, err := tx.Exec(ctx, sql, id, key, p); err != nil {
+			if _, err := pgtx.Call(ctx, tx, fn, pgtx.Args{"object": id, argKey: key, "params": pgtx.JSON(params)}); err != nil {
 				return err
 			}
 			row, err = objects.GetRow(ctx, tx, id)

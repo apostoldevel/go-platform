@@ -16,6 +16,7 @@ import (
 	"time"
 
 	platform "github.com/apostoldevel/go-platform"
+	"github.com/apostoldevel/go-platform/lib/pgtx"
 	"github.com/apostoldevel/go-platform/lib/problem"
 	"github.com/apostoldevel/go-platform/lib/rest"
 )
@@ -37,7 +38,7 @@ type module struct {
 
 var errors = rest.Writable{
 	Resource: rest.Resource{Prefix: "/api/v2/errors", GetFn: "api.get_error", ListFn: "api.list_error", CountFn: "api.count_error"},
-	SetSQL:   "SELECT row_to_json(t) FROM api.set_error($1::uuid, $2, $3::integer, $4::char, $5, $6, $7, $8) t",
+	SetFn:    "api.set_error",
 	NewBody:  func() rest.Body { return &body{} }, // absent severity/category default in api.add_error (db-platform ≥ 1.2.21)
 }
 
@@ -68,8 +69,8 @@ func (b *body) Validate(create bool) error {
 	return nil
 }
 
-func (b *body) Args(id any) []any {
-	return []any{id, b.Code, b.HTTPCode, b.Severity, b.Category, b.Message, b.Description, b.Resolution}
+func (b *body) Args(id any) pgtx.Args {
+	return pgtx.Args{"id": id, "code": b.Code, "httpcode": b.HTTPCode, "severity": b.Severity, "category": b.Category, "message": b.Message, "description": b.Description, "resolution": b.Resolution}
 }
 
 // New returns the package as a platform.Module.
@@ -86,12 +87,12 @@ func (m *module) Prefixes() []string { return []string{errors.Prefix} }
 // Routes registers the catalogue and the lookup by code on the shared mux.
 func (m *module) Routes(mux *http.ServeMux) {
 	errors.Routes(mux, m.cfg.Doer, m.idem, m.log)
-	mux.HandleFunc("GET "+errors.Prefix+"/by-code/{code}", rest.RowHandler(m.cfg.Doer, m.log,
-		"SELECT row_to_json(t) FROM api.get_error_by_code($1) t", func(r *http.Request) ([]any, error) {
+	mux.HandleFunc("GET "+errors.Prefix+"/by-code/{code}", rest.CallRowHandler(m.cfg.Doer, m.log,
+		"get_error_by_code", func(r *http.Request) (pgtx.Args, error) {
 			code := r.PathValue("code")
 			if !codeRe.MatchString(code) {
 				return nil, problem.New(400, "validation", "Bad request", "code must be ERR-GGG-CCC")
 			}
-			return []any{code}, nil
+			return pgtx.Args{"code": code}, nil
 		}))
 }

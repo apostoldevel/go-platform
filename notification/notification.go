@@ -9,7 +9,6 @@ package notification
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"log/slog"
 	"net/http"
 	"regexp"
@@ -17,6 +16,7 @@ import (
 	"time"
 
 	platform "github.com/apostoldevel/go-platform"
+	"github.com/apostoldevel/go-platform/lib/pgtx"
 	"github.com/apostoldevel/go-platform/lib/problem"
 	"github.com/apostoldevel/go-platform/lib/rest"
 	"github.com/jackc/pgx/v5"
@@ -81,13 +81,13 @@ func (m *module) Routes(mux *http.ServeMux) {
 	p := notifications.Prefix
 	mux.HandleFunc("GET "+p, notifications.List(m.cfg.Doer, m.log))
 	mux.HandleFunc("GET "+p+"/{id}", notifications.Get(m.cfg.Doer, m.log))
-	mux.HandleFunc("GET "+p+"/since", rest.RowsOf(m.cfg.Doer, m.log, "SELECT row_to_json(t) FROM api.notification($1::timestamptz) t", sinceArgs))
+	mux.HandleFunc("GET "+p+"/since", rest.CallRowsOf(m.cfg.Doer, m.log, "notification", sinceArgs))
 	mux.HandleFunc("GET "+p+"/changed", m.changed)
 }
 
 // sinceArgs is ?from= of /notifications/since: the caller's notifications
 // from a point in time (default now), as api.notification(from) gives them.
-func sinceArgs(r *http.Request) ([]any, error) {
+func sinceArgs(r *http.Request) (pgtx.Args, error) {
 	from, err := timeParam(r, "from")
 	if err != nil {
 		return nil, err
@@ -96,7 +96,7 @@ func sinceArgs(r *http.Request) ([]any, error) {
 		now := time.Now()
 		from = &now
 	}
-	return []any{*from}, nil
+	return pgtx.Args{"datefrom": *from}, nil
 }
 
 // changed is GET /notifications/changed?objects=a,b&from=&to=: the distinct
@@ -139,26 +139,43 @@ func (m *module) changed(w http.ResponseWriter, r *http.Request) {
 	searchJSON, _ := json.Marshal(search)
 	out := []json.RawMessage{}
 	err = m.cfg.Doer.Do(r.Context(), platform.SessionOf(r), rest.ReqOf(r, 200, nil), func(ctx context.Context, tx pgx.Tx) error {
-		pairs, err := rest.Rows(ctx, tx, "SELECT json_build_object('entity', entitycode, 'object', object) FROM api.list_notification($1::jsonb) GROUP BY entitycode, object", searchJSON)
+		notes, err := pgtx.Call(ctx, tx, "list_notification", pgtx.Args{"search": json.RawMessage(searchJSON)})
 		if err != nil {
 			return err
 		}
-		for _, p := range pairs {
-			var pair struct{ Entity, Object string }
-			if err := json.Unmarshal(p, &pair); err != nil {
+		// the distinct (entity, object) pairs, in the order first seen
+		type pair struct {
+			Entity string `json:"entitycode"`
+			Object string `json:"object"`
+		}
+		seen := map[pair]bool{}
+		for _, n := range notes {
+			var p pair
+			if err := json.Unmarshal(n, &p); err != nil {
 				return err
 			}
-			fn, ok := getFnOf(pair.Entity)
+			if seen[p] {
+				continue
+			}
+			seen[p] = true
+			fn, ok := getFnOf(p.Entity)
 			if !ok {
 				continue
 			}
-			var row json.RawMessage
-			if err := tx.QueryRow(ctx, "SELECT row_to_json(t) FROM "+fn+"($1::uuid) t WHERE t.id IS NOT NULL", pair.Object).Scan(&row); errors.Is(err, pgx.ErrNoRows) {
-				continue
-			} else if err != nil {
+			rows, err := pgtx.Call(ctx, tx, fn, pgtx.Args{"id": p.Object})
+			if err != nil {
 				return err
 			}
-			out = append(out, row)
+			// a row the caller may not read comes back empty or with a null id
+			for _, row := range rows {
+				var id struct {
+					ID *string `json:"id"`
+				}
+				if json.Unmarshal(row, &id) == nil && id.ID != nil {
+					out = append(out, row)
+					break
+				}
+			}
 		}
 		return nil
 	})

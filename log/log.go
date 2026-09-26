@@ -15,6 +15,7 @@ import (
 	"time"
 
 	platform "github.com/apostoldevel/go-platform"
+	"github.com/apostoldevel/go-platform/lib/pgtx"
 	"github.com/apostoldevel/go-platform/lib/problem"
 	"github.com/apostoldevel/go-platform/lib/rest"
 	"github.com/jackc/pgx/v5"
@@ -89,7 +90,9 @@ func (m *module) write(w http.ResponseWriter, r *http.Request) {
 	rest.Once(w, r, m.idem, platform.SessionOf(r).Code, raw, m.log, func(w http.ResponseWriter) {
 		var row json.RawMessage
 		err := m.cfg.Doer.Do(r.Context(), platform.SessionOf(r), rest.ReqOf(r, 201, raw), func(ctx context.Context, tx pgx.Tx) error {
-			return tx.QueryRow(ctx, "SELECT row_to_json(t) FROM api.write_to_log($1, $2::integer, $3, $4) t", e.Type, e.Code, e.Scope, e.Text).Scan(&row)
+			var err error
+			row, err = pgtx.CallRow(ctx, tx, "write_to_log", pgtx.Args{"type": e.Type, "code": e.Code, "scope": e.Scope, "text": e.Text})
+			return err
 		})
 		if err != nil {
 			rest.Fail(w, r, m.log, err)
