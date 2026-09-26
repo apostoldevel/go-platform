@@ -120,6 +120,36 @@ func Prefixes(modules ...Module) []string {
 	return out
 }
 
+// OpenPrefixes splits the prefixes a process would announce by the routes
+// the database guards (pgtx.Runner.Routes): a prefix is open when a route
+// lies on it, above it or under it — a request there reaches a guard that
+// may say yes. A prefix with no route anywhere on its line would be refused
+// ERR-403-010 on every request, so it is not announced: the gateway answers
+// for it as for a prefix nobody serves. routes nil (the direct road, no
+// guards in the database): every prefix is open. always are announced
+// whatever the routes say — the paths the process answers itself, without
+// the database (a health check).
+func OpenPrefixes(prefixes []string, routes []pgtx.Route, always ...string) (open, closed []string) {
+	if routes == nil {
+		return append([]string{}, prefixes...), nil
+	}
+	for _, p := range prefixes {
+		ok := false
+		for _, a := range always {
+			ok = ok || p == a
+		}
+		for _, rt := range routes {
+			ok = ok || rt.Path == p || strings.HasPrefix(rt.Path, p+"/") || strings.HasPrefix(p, rt.Path+"/")
+		}
+		if ok {
+			open = append(open, p)
+		} else {
+			closed = append(closed, p)
+		}
+	}
+	return open, closed
+}
+
 type ctxKey int
 
 const sessionKey ctxKey = 1
@@ -163,7 +193,7 @@ func (h *host) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.unauthorized(problem.CodeLoginFailed, "The access token could not be verified.").Write(w, r)
 		return
 	}
-	sess := pgtx.Session{Code: claims.Sub, Agent: r.Header.Get("User-Agent"), Host: clientAddr(r, h.cfg.TrustedProxies)}
+	sess := pgtx.Session{Code: claims.Sub, Token: tok, Agent: r.Header.Get("User-Agent"), Host: clientAddr(r, h.cfg.TrustedProxies)}
 	r = r.WithContext(context.WithValue(r.Context(), sessionKey, sess))
 	// every answer of the process is problem+json: the mux's own 404/405 are
 	// plain text, and a non-canonical path gets its text/html redirect — with a

@@ -5,10 +5,12 @@ package admin
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/apostoldevel/go-platform/internal/resttest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/apostoldevel/go-platform/internal/resttest"
+	"github.com/apostoldevel/go-platform/lib/pgtx"
 )
 
 func TestIntegration_GroupsLifecycleAndParity(t *testing.T) {
@@ -28,7 +30,7 @@ func TestIntegration_GroupsLifecycleAndParity(t *testing.T) {
 	t.Cleanup(func() { l.Call("DELETE", "/api/v2/groups/"+id, "") })
 
 	rec = l.Call("GET", "/api/v2/groups/"+id, "")
-	if rec.Code != 200 || !resttest.SameJSON(rec.Body.Bytes(), l.Direct(t, "SELECT row_to_json(t) FROM api.get_group($1::uuid) t", id)) {
+	if rec.Code != 200 || !resttest.SameJSON(rec.Body.Bytes(), l.Row(t, "get_group", pgtx.Args{"id": id})) {
 		t.Fatalf("get/parity: %d %s", rec.Code, rec.Body)
 	}
 	etag := rec.Header().Get("ETag")
@@ -42,7 +44,7 @@ func TestIntegration_GroupsLifecycleAndParity(t *testing.T) {
 	var me struct {
 		ID string `json:"id"`
 	}
-	_ = json.Unmarshal(l.Direct(t, "SELECT row_to_json(t) FROM api.get_user() t"), &me)
+	_ = json.Unmarshal(l.Row(t, "get_user", nil), &me)
 	if rec = l.Call("POST", "/api/v2/groups/"+id+"/members", `{"id":"`+me.ID+`"}`); rec.Code != 204 {
 		t.Fatalf("member add: %d %s", rec.Code, rec.Body)
 	}
@@ -50,7 +52,7 @@ func TestIntegration_GroupsLifecycleAndParity(t *testing.T) {
 	if rec.Code != 200 || !strings.Contains(rec.Body.String(), me.ID) {
 		t.Fatalf("members: %d %s", rec.Code, rec.Body)
 	}
-	if !resttest.SameJSON(rec.Body.Bytes(), l.Direct(t, "SELECT coalesce(json_agg(row_to_json(t)), '[]') FROM api.group_member($1::uuid) t", id)) {
+	if !resttest.SameJSON(rec.Body.Bytes(), l.Rows(t, "group_member", pgtx.Args{"groupid": id})) {
 		t.Fatalf("members parity: %s", rec.Body)
 	}
 	if rec = l.Call("DELETE", "/api/v2/groups/"+id+"/members/"+me.ID, ""); rec.Code != 204 {
@@ -78,21 +80,14 @@ func TestIntegration_AreasAndInterfaces(t *testing.T) {
 	l := live(t)
 	stamp := fmt.Sprintf("%d", time.Now().UnixNano())
 
-	// area types: a view, read as the pool's role — v1 reads it inside a
-	// SECURITY DEFINER rest.admin; without GRANT SELECT … TO apibot the v2
-	// answer is a grant defect of the database, not a Go one
-	var granted bool
-	_ = json.Unmarshal(l.Direct(t, "SELECT to_json(has_table_privilege(current_user, 'api.area_type', 'SELECT'))"), &granted)
-	if rec := l.Call("GET", "/api/v2/area-types", ""); granted {
-		if rec.Code != 200 || !resttest.SameJSON(rec.Body.Bytes(), l.Direct(t, "SELECT coalesce(json_agg(row_to_json(t)), '[]') FROM api.area_type t")) {
-			t.Fatalf("area-types: %d %s", rec.Code, rec.Body)
-		}
-	} else if rec.Code != 500 {
-		t.Fatalf("area-types without the grant: %d %s", rec.Code, rec.Body)
-	} else {
-		t.Log("api.area_type is not granted to the pool's role — GET /api/v2/area-types answers 500 until db-platform grants SELECT on api.* views to the pool role (a database change)")
+	// area types and locales: the module calls api.list_area_type and
+	// api.list_locale (by code) and no longer reads the views api.area_type /
+	// api.locale, so there is no privilege on a view to probe — the
+	// references are the same functions with the module's arguments
+	if rec := l.Call("GET", "/api/v2/area-types", ""); rec.Code != 200 || !resttest.SameJSON(rec.Body.Bytes(), l.Rows(t, "list_area_type", pgtx.Args{"limit": 0})) {
+		t.Fatalf("area-types: %d %s", rec.Code, rec.Body)
 	}
-	if rec := l.Call("GET", "/api/v2/locales", ""); rec.Code != 200 || !strings.Contains(rec.Body.String(), `"code":"en"`) || !resttest.SameJSON(rec.Body.Bytes(), l.Direct(t, "SELECT coalesce(json_agg(row_to_json(t) ORDER BY t.code), '[]') FROM api.locale t")) {
+	if rec := l.Call("GET", "/api/v2/locales", ""); rec.Code != 200 || !strings.Contains(rec.Body.String(), `"code":"en"`) || !resttest.SameJSON(rec.Body.Bytes(), l.Rows(t, "list_locale", pgtx.Args{"orderby": json.RawMessage(`["code ASC"]`), "limit": 0})) {
 		t.Fatalf("locales: %d %s", rec.Code, rec.Body)
 	}
 	rec := l.Call("GET", "/api/v2/areas?page[limit]=5", "")
@@ -114,7 +109,7 @@ func TestIntegration_AreasAndInterfaces(t *testing.T) {
 	_ = json.Unmarshal(rec.Body.Bytes(), &created)
 	aid, _ := created["id"].(string)
 	t.Cleanup(func() { l.Call("DELETE", "/api/v2/areas/"+aid, "") })
-	if rec = l.Call("GET", "/api/v2/areas/"+aid, ""); rec.Code != 200 || !resttest.SameJSON(rec.Body.Bytes(), l.Direct(t, "SELECT row_to_json(t) FROM api.get_area($1::uuid) t", aid)) {
+	if rec = l.Call("GET", "/api/v2/areas/"+aid, ""); rec.Code != 200 || !resttest.SameJSON(rec.Body.Bytes(), l.Row(t, "get_area", pgtx.Args{"id": aid})) {
 		t.Fatalf("area get/parity: %d %s", rec.Code, rec.Body)
 	}
 	rec = l.Call("POST", "/api/v2/areas/"+aid+"/actions/delete-safely", "")
@@ -140,7 +135,7 @@ func TestIntegration_AreasAndInterfaces(t *testing.T) {
 	var me struct {
 		ID string `json:"id"`
 	}
-	_ = json.Unmarshal(l.Direct(t, "SELECT row_to_json(t) FROM api.get_user() t"), &me)
+	_ = json.Unmarshal(l.Row(t, "get_user", nil), &me)
 	if rec = l.Call("POST", "/api/v2/interfaces/"+iid+"/members", `{"id":"`+me.ID+`"}`); rec.Code != 204 {
 		t.Fatalf("interface member add: %d %s", rec.Code, rec.Body)
 	}

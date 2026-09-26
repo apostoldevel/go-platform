@@ -3,9 +3,7 @@
 package log
 
 import (
-	"context"
 	"encoding/json"
-	"github.com/jackc/pgx/v5"
 	"strconv"
 	"strings"
 	"testing"
@@ -16,7 +14,7 @@ import (
 )
 
 func live(t *testing.T) *resttest.Live {
-	return resttest.Start(t, "go-log-test", func(r *pgtx.Runner) platform.Module { return New(Config{Doer: r}) })
+	return resttest.Start(t, "go-log-test", func(r resttest.Doer) platform.Module { return New(Config{Doer: r}) })
 }
 
 func TestIntegration_EventLogReadParity(t *testing.T) {
@@ -35,12 +33,7 @@ func TestIntegration_EventLogReadParity(t *testing.T) {
 	}
 	id := strconv.FormatInt(list.Items[0].ID, 10)
 	rec = l.Call("GET", "/api/v2/event-log/"+id, "")
-	var want json.RawMessage
-	if err := l.Runner.Do(context.Background(), l.Session, &pgtx.Request{Method: "TEST", Path: "/parity"}, func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, "SELECT row_to_json(t) FROM api.get_event_log($1::bigint) t", list.Items[0].ID).Scan(&want)
-	}); err != nil {
-		t.Fatal(err)
-	}
+	want := l.Row(t, "get_event_log", pgtx.Args{"id": list.Items[0].ID})
 	if rec.Code != 200 || !resttest.SameJSON(rec.Body.Bytes(), want) {
 		t.Fatalf("get/parity: %d\n v2 %s\n v1 %s", rec.Code, rec.Body, want)
 	}

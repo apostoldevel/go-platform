@@ -55,6 +55,9 @@ func env(t *testing.T) (pool string, mint func(t *testing.T) string) {
 	return dsn, mint
 }
 
+// runner is the direct road's: under a role that may take the daemon road
+// (the daemon role on db-platform 1.2.31) these tests are skipped —
+// daemon_integration_test.go covers that road.
 func runner(t *testing.T, dsn string) *pgtx.Runner {
 	t.Helper()
 	pool, err := pgtx.NewPool(context.Background(), dsn)
@@ -62,6 +65,13 @@ func runner(t *testing.T, dsn string) *pgtx.Runner {
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
+	probe := &pgtx.Runner{Pool: pool}
+	if err := probe.Detect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if probe.Features.Daemon {
+		t.Skip("the role takes the daemon road — the direct road's test does not apply")
+	}
 	return &pgtx.Runner{Pool: pool}
 }
 

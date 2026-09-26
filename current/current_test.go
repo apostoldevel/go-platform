@@ -54,23 +54,26 @@ func TestPatch_DecidesBeforeTheDatabase(t *testing.T) {
 	}
 }
 
-// area/interface/locale take a uuid or a code: the overload is chosen from
-// the shape of the value — by the parameter's name for locale (pLocale /
-// pCode), by a pinned type for area (one name for both); interface is a uuid.
-func TestSessionArgs_UUIDOrCode(t *testing.T) {
+// area/interface/locale take a uuid or a code: the function and its key are
+// chosen from the shape of the value — by the parameter's name for locale
+// (pLocale / pCode), by a function of its own for an area's code
+// (set_session_area_by_code: daemon.call chooses a form by keys, and both
+// set_session_area forms have one key); interface is a uuid.
+func TestSessionCall_UUIDOrCode(t *testing.T) {
 	const id = "7f3a0000-0000-4000-8000-000000000001"
 	for _, c := range []struct {
 		name, v string
+		fn      string
 		want    pgtx.Args
 	}{
-		{"locale", id, pgtx.Args{"locale": id}},
-		{"locale", "ru", pgtx.Args{"code": "ru"}},
-		{"area", id, pgtx.Args{"area": pgtx.Typed{V: id, Type: "uuid"}}},
-		{"area", "default", pgtx.Args{"area": pgtx.Typed{V: "default", Type: "text"}}},
-		{"interface", id, pgtx.Args{"interface": id}},
+		{"locale", id, "set_session_locale", pgtx.Args{"locale": id}},
+		{"locale", "ru", "set_session_locale", pgtx.Args{"code": "ru"}},
+		{"area", id, "set_session_area", pgtx.Args{"area": id}},
+		{"area", "default", "set_session_area_by_code", pgtx.Args{"code": "default"}},
+		{"interface", id, "set_session_interface", pgtx.Args{"interface": id}},
 	} {
-		if got := sessionArgs(c.name, c.v); !reflect.DeepEqual(got, c.want) {
-			t.Errorf("%s %q: %#v, want %#v", c.name, c.v, got, c.want)
+		if fn, got := sessionCall(c.name, c.v); fn != c.fn || !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%s %q: %s %#v, want %s %#v", c.name, c.v, fn, got, c.fn, c.want)
 		}
 	}
 }

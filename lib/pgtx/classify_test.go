@@ -84,20 +84,62 @@ func TestClassify_ForeignKeyOnDeleteIsAConflict(t *testing.T) {
 }
 
 func TestFeatures_FromProcNames(t *testing.T) {
-	f := featuresFrom([]proc{{"authorize", 3}, {"authorize_local", 3}, {"log_request", 6}})
+	f := featuresFrom([]proc{{schema: "api", name: "authorize", nargs: 3}, {schema: "api", name: "authorize_local", nargs: 3}, {schema: "api", name: "log_request", nargs: 6}})
 	if !f.AuthorizeLocal || !f.LogRequest || f.LogRequestErr || f.ParseMessage {
 		t.Fatalf("%+v", f)
 	}
 	// db-platform 1.2.24: the seventh parameter pError — read off pronargs
-	if f := featuresFrom([]proc{{"log_request", 7}}); !f.LogRequest || !f.LogRequestErr {
+	if f := featuresFrom([]proc{{schema: "api", name: "log_request", nargs: 7}}); !f.LogRequest || !f.LogRequestErr {
 		t.Fatalf("%+v", f)
 	}
 	// both overloads present, in either order: the seven-argument call is the unambiguous one
-	if f := featuresFrom([]proc{{"log_request", 7}, {"log_request", 6}}); !f.LogRequestErr {
+	if f := featuresFrom([]proc{{schema: "api", name: "log_request", nargs: 7}, {schema: "api", name: "log_request", nargs: 6}}); !f.LogRequestErr {
 		t.Fatalf("%+v", f)
 	}
-	if f := featuresFrom(nil); f.AuthorizeLocal || f.LogRequest || f.LogRequestErr || f.ParseMessage {
+	if f := featuresFrom(nil); f.AuthorizeLocal || f.LogRequest || f.LogRequestErr || f.ParseMessage || f.Daemon {
 		t.Fatalf("%+v", f)
+	}
+}
+
+// The daemon road is taken only when all five functions exist AND the role
+// may execute each — a database before 1.2.31, or a role the functions are
+// revoked from, stays on the direct road instead of answering 500 on every
+// request. (On 1.2.31 the functions carry the default PUBLIC EXECUTE, so it
+// is the version that decides in practice, not the role.)
+func TestFeatures_DaemonRoad(t *testing.T) {
+	road := func(exec map[string]bool) []proc {
+		var ps []proc
+		for _, n := range daemonRoad {
+			if e, ok := exec[n]; ok {
+				ps = append(ps, proc{schema: "daemon", name: n, nargs: 1, exec: e})
+			}
+		}
+		return ps
+	}
+	all := map[string]bool{"begin": true, "call": true, "end": true, "error": true, "routes": true}
+	if f := featuresFrom(road(all)); !f.Daemon {
+		t.Fatalf("all five callable: %+v", f)
+	}
+	for _, n := range daemonRoad {
+		noExec := map[string]bool{}
+		missing := map[string]bool{}
+		for k, v := range all {
+			noExec[k] = v
+			if k != n {
+				missing[k] = v
+			}
+		}
+		noExec[n] = false
+		if f := featuresFrom(road(noExec)); f.Daemon {
+			t.Fatalf("%s not executable, road taken: %+v", n, f)
+		}
+		if f := featuresFrom(road(missing)); f.Daemon {
+			t.Fatalf("%s missing, road taken: %+v", n, f)
+		}
+	}
+	// a same-named function of schema api does not stand in for daemon's
+	if f := featuresFrom(append(road(map[string]bool{"begin": true, "call": true, "end": true, "error": true}), proc{schema: "api", name: "routes", exec: true})); f.Daemon {
+		t.Fatalf("api.routes counted as daemon.routes: %+v", f)
 	}
 }
 

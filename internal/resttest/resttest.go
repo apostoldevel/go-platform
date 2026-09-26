@@ -1,8 +1,9 @@
 // Package resttest is the shared scaffolding of the packages' integration
 // tests: a pool as the module's role, an administrator's session minted with
-// the admin DSN, a host around the package under test, calls with the
-// headers the gateway forwards, and api.* run directly through the same
-// transaction for parity with the v1 answer.
+// the admin DSN (on the daemon road with a token the database issued), a
+// host around the package under test, calls with the headers the gateway
+// forwards, and api.* called through the same road for parity with the v1
+// answer — by name, as the module calls them, never as text of SQL.
 package resttest
 
 import (
@@ -19,6 +20,7 @@ import (
 	platform "github.com/apostoldevel/go-platform"
 	"github.com/apostoldevel/go-platform/lib/auth/jwt"
 	"github.com/apostoldevel/go-platform/lib/pgtx"
+	"github.com/apostoldevel/go-platform/lib/pgtx/pgtxtest"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -30,11 +32,19 @@ func Token(sub string) string {
 	return jwt.Sign(jwt.Claims{Iss: "accounts.test", Aud: "web-test", Sub: sub, Exp: time.Now().Add(time.Hour).Unix()}, "HS256", []byte("s"))
 }
 
+// Doer is what a package under test takes: the runner, wrapped so that on
+// the daemon road the database gets the token it issued for the session
+// while the host verifies its own test-signed one.
+type Doer = pgtxtest.Doer
+
 // Live is one integration-test environment: GO_TEST_PG_DSN (the pool, the
-// module's role), GO_TEST_ADMIN_DSN (mints the administrator's session).
+// module's role), GO_TEST_ADMIN_DSN (mints the administrator's session),
+// and on the daemon road GO_TEST_AUDIENCE (the client id its token is
+// issued for).
 type Live struct {
 	Handler http.Handler
 	Runner  *pgtx.Runner
+	Doer    Doer
 	Session pgtx.Session
 	agent   string
 }
@@ -42,7 +52,7 @@ type Live struct {
 // Start skips the test without the environment; otherwise it mints a session
 // (signed out at the end), detects the database's features and hosts the
 // module New builds over the runner.
-func Start(t *testing.T, agent string, mod func(runner *pgtx.Runner) platform.Module) *Live {
+func Start(t *testing.T, agent string, mod func(d Doer) platform.Module) *Live {
 	t.Helper()
 	dsn, admin := os.Getenv("GO_TEST_PG_DSN"), os.Getenv("GO_TEST_ADMIN_DSN")
 	if dsn == "" || admin == "" {
@@ -53,31 +63,43 @@ func Start(t *testing.T, agent string, mod func(runner *pgtx.Runner) platform.Mo
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
+	runner := &pgtx.Runner{Pool: pool, Logger: slog.New(slog.NewTextHandler(os.Stderr, nil))}
+	if err := runner.Detect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	cfg, _ := pgx.ParseConfig(admin)
 	conn, err := pgx.Connect(context.Background(), admin)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var session string
-	if err := conn.QueryRow(context.Background(), "SELECT session FROM api.login($1, $2, $3, '127.0.0.1')", cfg.User, cfg.Password, agent).Scan(&session); err != nil {
-		t.Fatal(err)
+	var session, token string
+	if runner.Features.Daemon {
+		aud := os.Getenv("GO_TEST_AUDIENCE")
+		if aud == "" {
+			t.Fatal("the daemon road needs GO_TEST_AUDIENCE: the client id the test token is issued for")
+		}
+		session, token, err = pgtxtest.Login(context.Background(), conn, aud, cfg.User, cfg.Password, agent)
+	} else {
+		err = conn.QueryRow(context.Background(), "SELECT session FROM api.login($1, $2, $3, '127.0.0.1')", cfg.User, cfg.Password, agent).Scan(&session)
 	}
 	conn.Close(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() {
 		if c, err := pgx.Connect(context.Background(), admin); err == nil {
 			_, _ = c.Exec(context.Background(), "SELECT api.signout($1)", session)
 			c.Close(context.Background())
 		}
 	})
-	runner := &pgtx.Runner{Pool: pool, Logger: slog.New(slog.NewTextHandler(os.Stderr, nil))}
-	if err := runner.Detect(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	h, err := platform.New(platform.Config{Keys: Keys, Catalogue: runner}, mod(runner))
+	tokens := &pgtxtest.Tokens{}
+	tokens.Add(session, token)
+	doer := tokens.Doer(runner)
+	h, err := platform.New(platform.Config{Keys: Keys, Catalogue: runner}, mod(doer))
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &Live{Handler: h, Runner: runner, Session: pgtx.Session{Code: session, Agent: agent, Host: "127.0.0.1"}, agent: agent}
+	return &Live{Handler: h, Runner: runner, Doer: doer, Session: pgtx.Session{Code: session, Token: token, Agent: agent, Host: "127.0.0.1"}, agent: agent}
 }
 
 // Call sends one request as the gateway would: bearer of the session, request
@@ -96,17 +118,47 @@ func (l *Live) Call(method, path, body string, hdr ...string) *httptest.Response
 	return rec
 }
 
-// Direct runs one api.* query through the same request transaction the
-// module uses — the v1 answer without the v1 envelope.
-func (l *Live) Direct(t *testing.T, sql string, args ...any) json.RawMessage {
+// RefPath is the route the parity reference runs under: GET /api/v2/me,
+// open to any session (GuardSession) — the level of the function called is
+// decided by the allow list, not by the route.
+const RefPath = "/api/v2/me"
+
+// Try runs one api.* function through the road the module takes (the same
+// runner and session) and returns its rows — the v1 answer without the v1
+// envelope — or the refusal.
+func (l *Live) Try(fn string, args pgtx.Args) ([]json.RawMessage, error) {
+	var rows []json.RawMessage
+	err := l.Doer.Do(context.Background(), l.Session, &pgtx.Request{Method: "GET", Path: RefPath}, func(ctx context.Context, tx pgx.Tx) (err error) {
+		rows, err = pgtx.Call(ctx, tx, fn, args)
+		return err
+	})
+	return rows, err
+}
+
+// Rows is Try as one JSON array, failing the test on a refusal: the shape of
+// a list answer (json_agg of the rows, [] for none).
+func (l *Live) Rows(t *testing.T, fn string, args pgtx.Args) json.RawMessage {
 	t.Helper()
-	var row json.RawMessage
-	if err := l.Runner.Do(context.Background(), l.Session, &pgtx.Request{Method: "TEST", Path: "/parity"}, func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, sql, args...).Scan(&row)
-	}); err != nil {
-		t.Fatal(err)
+	rows, err := l.Try(fn, args)
+	if err != nil {
+		t.Fatalf("%s: %v", fn, err)
 	}
-	return row
+	out, _ := json.Marshal(rows)
+	return out
+}
+
+// Row is the first row of Try (null when none), failing the test on a
+// refusal: the shape of a one-row answer, or of a scalar's value.
+func (l *Live) Row(t *testing.T, fn string, args pgtx.Args) json.RawMessage {
+	t.Helper()
+	rows, err := l.Try(fn, args)
+	if err != nil {
+		t.Fatalf("%s: %v", fn, err)
+	}
+	if len(rows) == 0 || rows[0] == nil {
+		return json.RawMessage("null")
+	}
+	return rows[0]
 }
 
 // Page is the shape of a list answer.

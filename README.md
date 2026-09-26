@@ -45,7 +45,7 @@ lib/
   auth/jwt/            HS256/384/512 verification with the secrets of the OAuth2 providers; Keyring, Claims
   gateway/frame/       the control-plane frame {t,u,a,p,c,m}: CALL, CALLRESULT, CALLERROR; 64 KiB limit
   gatewayclient/       connect, /register, heartbeat, /status, /unregister; /ping, /drain, /reload; reconnect
-  pgtx/                one request = one transaction: api.authorize → SAVEPOINT → api.* → api.log_request → COMMIT; a refusal is journalled too
+  pgtx/                one request = one transaction: daemon.begin → SAVEPOINT → daemon.call … → daemon.end → COMMIT (the daemon role, db-platform 1.2.31); a refusal is journalled too
   problem/             application/problem+json with the database's error catalogue
   query/               ?filter[…]&sort=&fields=&page[limit]= → the search/orderby/fields jsonb of api.sql()
   rest/                the shape of a resource: list, row + ETag, create/update/delete, Idempotency-Key, If-Match
@@ -90,7 +90,21 @@ Most packages do not write handlers at all: `rest.Resource` names the `api.get_<
 Request path
 -
 
-One HTTP request is one database transaction (`lib/pgtx`):
+One HTTP request is one database transaction (`lib/pgtx`). Under the `daemon` role on db-platform 1.2.31 — the road `Runner.Detect` takes when all of `daemon.begin`, `call`, `end`, `error`, `routes` exist and the role may execute them — the database opens, guards and journals the request itself:
+
+```
+BEGIN
+  SELECT * FROM daemon.begin($token, $agent, $host, $method, $path, $payload, $request_id)
+  SAVEPOINT request
+  … the handler's pgtx.Call → daemon.call($fn, $args) …
+  [ROLLBACK TO SAVEPOINT request]                        -- on a refusal
+  SELECT * FROM daemon.end($status, $message)
+COMMIT
+```
+
+`daemon.begin` verifies the bearer token again (`TokenValidation`: the database trusts no code it did not check), opens the session context at the transaction level and runs the guard of the route — a path with no guard is `403 ERR-403-010`, the road is closed by default; a refusal there is already journalled and commits alone, the handler never runs. `daemon.call` reaches only the functions of schema `api` its allow list registers (`ERR-403-012` otherwise), restores the request's context before every call — whatever the connection set in between is overwritten — and chooses the registered form by the argument keys. `daemon.end` completes the journal line with the status on the wire and the catalogue code of a refusal. The catalogue titles come from `daemon.error`, without a session; `Runner.Routes` reads `daemon.routes('v2')` so that a process does not announce a prefix no route lies on (`platform.OpenPrefixes`). `lib/pgtx/pgtxtest` mints a test session with a token the database issued.
+
+Before 1.2.31, or under a role without the daemon functions (the direct road):
 
 ```
 BEGIN
@@ -216,7 +230,7 @@ mods := []platform.Module{
 handler, err := platform.New(platform.Config{Keys: keys, InFlight: &inFlight}, mods...)
 ```
 
-**Database.** The db-platform version named in `platform.DBPlatform`, with the `gateway` module (`api.authorize_local`, `api.log_request`) for the session-per-transaction path; without it the library falls back to `api.authorize` and logs nothing.
+**Database.** The db-platform version named in `platform.DBPlatform`, connected as the `daemon` role: `daemon.begin/call/end` (1.2.31) is the road. Before it, the `gateway` module (`api.authorize_local`, `api.log_request`) gives the session-per-transaction path on the direct road; without either the library falls back to `api.authorize` and logs nothing.
 
 **Gateway.** [Gateway API](https://github.com/apostoldevel/module-GatewayAPI) in the Apostol worker, with the module's network in its `allowed_cidr`. Without the gateway a module still answers `/api/v2/*` on its address; `cmd/gatewaystub` plays the control plane for a local run:
 
@@ -231,11 +245,12 @@ Tests
 go build ./... && go vet ./... && gofmt -l . && go test ./... -count=1 -race
 ```
 
-Integration tests run against a live db-platform database, as the API role, and mint their session through an administrator's login:
+Integration tests run against a live db-platform database, as the API role, and mint their session through an administrator's login — on the daemon road with a token the database issues for the audience named (a front-end's client id):
 
 ```bash
-GO_TEST_PG_DSN=postgres://apibot:…@localhost:5432/db \
+GO_TEST_PG_DSN=postgres://daemon:…@localhost:5432/db \
 GO_TEST_ADMIN_DSN=postgres://admin:…@localhost:5432/db \
+GO_TEST_AUDIENCE=<client id> \
 GO_TEST_DB_PLATFORM_VERSION=$(cat path/to/db-platform/VERSION) \
   go test -tags integration -run Integration ./... -count=1
 ```

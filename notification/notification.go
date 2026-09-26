@@ -4,6 +4,10 @@
 // list and one row: /since?from= (v1 /notification {point}) and /changed —
 // the objects behind the notifications of a period, each read through its
 // entity's api.get_<entity> (v1 /notification/changed/objects).
+//
+// Every read is the caller's own: the *_my_notification functions (db-platform
+// 1.2.31) take the user from the session and filter by the tenant barrier;
+// the plain ones are an administrator's and are not called here.
 package notification
 
 import (
@@ -36,7 +40,7 @@ type module struct {
 	log *slog.Logger
 }
 
-var notifications = rest.Resource{Prefix: "/api/v2/notifications", GetFn: "api.get_notification", ListFn: "api.list_notification", CountFn: "api.count_notification"}
+var notifications = rest.Resource{Prefix: "/api/v2/notifications", GetFn: "api.get_my_notification", ListFn: "api.list_my_notification", CountFn: "api.count_my_notification"}
 
 // maxObjects bounds ?objects= of /changed: one request, one page of objects.
 const maxObjects = 100
@@ -81,12 +85,12 @@ func (m *module) Routes(mux *http.ServeMux) {
 	p := notifications.Prefix
 	mux.HandleFunc("GET "+p, notifications.List(m.cfg.Doer, m.log))
 	mux.HandleFunc("GET "+p+"/{id}", notifications.Get(m.cfg.Doer, m.log))
-	mux.HandleFunc("GET "+p+"/since", rest.CallRowsOf(m.cfg.Doer, m.log, "notification", sinceArgs))
+	mux.HandleFunc("GET "+p+"/since", rest.CallRowsOf(m.cfg.Doer, m.log, "my_notification", sinceArgs))
 	mux.HandleFunc("GET "+p+"/changed", m.changed)
 }
 
 // sinceArgs is ?from= of /notifications/since: the caller's notifications
-// from a point in time (default now), as api.notification(from) gives them.
+// from a point in time (default now), as api.my_notification(from) gives them.
 func sinceArgs(r *http.Request) (pgtx.Args, error) {
 	from, err := timeParam(r, "from")
 	if err != nil {
@@ -139,7 +143,7 @@ func (m *module) changed(w http.ResponseWriter, r *http.Request) {
 	searchJSON, _ := json.Marshal(search)
 	out := []json.RawMessage{}
 	err = m.cfg.Doer.Do(r.Context(), platform.SessionOf(r), rest.ReqOf(r, 200, nil), func(ctx context.Context, tx pgx.Tx) error {
-		notes, err := pgtx.Call(ctx, tx, "list_notification", pgtx.Args{"search": json.RawMessage(searchJSON)})
+		notes, err := pgtx.Call(ctx, tx, "list_my_notification", pgtx.Args{"search": json.RawMessage(searchJSON)})
 		if err != nil {
 			return err
 		}

@@ -121,6 +121,9 @@ func (m *module) create(w http.ResponseWriter, r *http.Request) {
 // confirm is POST /verification/codes/confirm {type, code}: the code is
 // spent — 200 {confirmed: true}; a wrong or used code is 400 with the
 // database's reason, as in v1's {result: false, message}.
+// On the daemon road (db-platform 1.2.31) the database refuses the call —
+// ERR-403-012: confirm_verification_code substitutes the session's user and
+// is kept out of daemon.call's allow list until it is rewritten without.
 func (m *module) confirm(w http.ResponseWriter, r *http.Request) {
 	b, raw, err := m.read(r, true)
 	if err != nil {

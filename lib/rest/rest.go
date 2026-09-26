@@ -46,10 +46,12 @@ type Resource struct {
 	IntID   bool   // the id is a bigint (journals), not a uuid
 }
 
-// ReqOf describes the request for api.log_request; status is what the handler
-// will answer on success.
+// ReqOf describes the request for the journal and the route guard; status is
+// what the handler will answer on success. The path is the escaped one, as
+// it came: daemon.begin judges the path the mux routed, and a %2F inside a
+// segment must not read as a deeper node there (it refuses any escape).
 func ReqOf(r *http.Request, status int, payload []byte) *pgtx.Request {
-	return &pgtx.Request{Method: r.Method, Path: r.URL.Path, Payload: payload, RequestID: r.Header.Get("X-Request-Id"), Status: status}
+	return &pgtx.Request{Method: r.Method, Path: r.URL.EscapedPath(), Payload: payload, RequestID: r.Header.Get("X-Request-Id"), Status: status}
 }
 
 // Fail writes any error as problem+json; a non-problem becomes 500 and is logged.

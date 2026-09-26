@@ -11,12 +11,11 @@ import (
 
 	platform "github.com/apostoldevel/go-platform"
 	"github.com/apostoldevel/go-platform/internal/resttest"
-	"github.com/apostoldevel/go-platform/lib/pgtx"
 	"github.com/jackc/pgx/v5"
 )
 
 func live(t *testing.T) *resttest.Live {
-	return resttest.Start(t, "go-current-test", func(r *pgtx.Runner) platform.Module { return New(Config{Doer: r}) })
+	return resttest.Start(t, "go-current-test", func(r resttest.Doer) platform.Module { return New(Config{Doer: r}) })
 }
 
 type me struct {
@@ -69,14 +68,16 @@ func TestIntegration_MeIsTheSevenReads(t *testing.T) {
 	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &parts) != nil {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
 	}
-	for part, sql := range map[string]string{
-		"user":      "SELECT row_to_json(t) FROM api.current_user() t",
-		"area":      "SELECT row_to_json(t) FROM api.current_area() t",
-		"interface": "SELECT row_to_json(t) FROM api.current_interface() t",
-		"locale":    "SELECT row_to_json(t) FROM api.current_locale() t",
-		"oper_date": "SELECT coalesce(to_json(api.oper_date()), 'null'::json)",
+	// each part and the api.* function it is: the first row (null when
+	// none), and for oper_date the scalar's value
+	for part, fn := range map[string]string{
+		"user":      "current_user",
+		"area":      "current_area",
+		"interface": "current_interface",
+		"locale":    "current_locale",
+		"oper_date": "oper_date",
 	} {
-		got, want := parts[part], l.Direct(t, sql)
+		got, want := parts[part], l.Row(t, fn, nil)
 		if part == "user" {
 			got, want = withoutSessionTraces(t, got), withoutSessionTraces(t, want)
 		}
@@ -114,7 +115,7 @@ func TestIntegration_PatchMeLocaleAndOperDate(t *testing.T) {
 		t.Fatalf("by id: %d %s", rec.Code, rec.Body)
 	}
 	rec = l.Call("PATCH", "/api/v2/me", `{"oper_date":"2026-01-02T03:04:05Z"}`)
-	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &m) != nil || m.OperDate == nil || !resttest.SameJSON([]byte(`"`+*m.OperDate+`"`), l.Direct(t, "SELECT to_json(api.oper_date())")) {
+	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &m) != nil || m.OperDate == nil || !resttest.SameJSON([]byte(`"`+*m.OperDate+`"`), l.Row(t, "oper_date", nil)) {
 		t.Fatalf("oper_date: %d %s", rec.Code, rec.Body)
 	}
 	rec = l.Call("PATCH", "/api/v2/me", `{"oper_date":null}`)
@@ -126,6 +127,16 @@ func TestIntegration_PatchMeLocaleAndOperDate(t *testing.T) {
 	}
 	if rec = l.Call("PATCH", "/api/v2/me", `{"area":"7f3a0000-0000-4000-8000-000000000001"}`); rec.Code != 404 && rec.Code != 400 {
 		t.Fatalf("unknown area: %d %s", rec.Code, rec.Body)
+	}
+	// the area by its code (set_session_area_by_code) and by its id: the
+	// session's own area, so nothing moves
+	code, _ := before.Area["code"].(string)
+	id, _ := before.Area["id"].(string)
+	for _, v := range []string{code, id} {
+		rec = l.Call("PATCH", "/api/v2/me", `{"area":"`+v+`"}`)
+		if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &m) != nil || m.Area["id"] != id {
+			t.Fatalf("area %q: %d %s", v, rec.Code, rec.Body)
+		}
 	}
 }
 
@@ -154,7 +165,7 @@ func TestIntegration_MeParityUnderAnotherSessionOfTheUser(t *testing.T) {
 	if _, err := conn.Exec(context.Background(), "SELECT api.signout($1)", other); err != nil {
 		t.Fatal(err)
 	}
-	got, want := parts["user"], l.Direct(t, "SELECT row_to_json(t) FROM api.current_user() t")
+	got, want := parts["user"], l.Row(t, "current_user", nil)
 	if resttest.SameJSON(got, want) {
 		// Login writes lc_ip unconditionally: a raw match means the race was
 		// not reproduced, and the exclusion below would be proving nothing

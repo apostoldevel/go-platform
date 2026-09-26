@@ -13,7 +13,7 @@ import (
 )
 
 func live(t *testing.T) *resttest.Live {
-	return resttest.Start(t, "go-error-test", func(r *pgtx.Runner) platform.Module { return New(Config{Doer: r}) })
+	return resttest.Start(t, "go-error-test", func(r resttest.Doer) platform.Module { return New(Config{Doer: r}) })
 }
 
 // The catalogue as the panel and lib/pgtx read it: list, one by id, one by
@@ -29,11 +29,11 @@ func TestIntegration_CatalogueReads(t *testing.T) {
 	id, _ := p.Items[0]["id"].(string)
 	code, _ := p.Items[0]["code"].(string)
 	rec := l.Call("GET", "/api/v2/errors/"+id, "")
-	if rec.Code != 200 || !resttest.SameJSON(rec.Body.Bytes(), l.Direct(t, "SELECT row_to_json(t) FROM api.get_error($1::uuid) t", id)) {
+	if rec.Code != 200 || !resttest.SameJSON(rec.Body.Bytes(), l.Row(t, "get_error", pgtx.Args{"id": id})) {
 		t.Fatalf("get parity: %d %s", rec.Code, rec.Body)
 	}
 	rec = l.Call("GET", "/api/v2/errors/by-code/"+code, "")
-	if rec.Code != 200 || !resttest.SameJSON(rec.Body.Bytes(), l.Direct(t, "SELECT row_to_json(t) FROM api.get_error_by_code($1) t", code)) {
+	if rec.Code != 200 || !resttest.SameJSON(rec.Body.Bytes(), l.Row(t, "get_error_by_code", pgtx.Args{"code": code})) {
 		t.Fatalf("by-code parity: %d %s", rec.Code, rec.Body)
 	}
 	if tag := rec.Header().Get("ETag"); tag == "" {
@@ -71,7 +71,7 @@ func TestIntegration_ReservedCodeCreateOrPatch(t *testing.T) {
 			t.Fatalf("412: %d %s", st.Code, st.Body)
 		}
 		rec = l.Call("PATCH", "/api/v2/errors/"+id, `{"message":"Go integration test"}`, "If-Match", rec.Header().Get("ETag"))
-		if rec.Code != 200 || !resttest.SameJSON(rec.Body.Bytes(), l.Direct(t, "SELECT row_to_json(t) FROM api.get_error($1::uuid) t", id)) {
+		if rec.Code != 200 || !resttest.SameJSON(rec.Body.Bytes(), l.Row(t, "get_error", pgtx.Args{"id": id})) {
 			t.Fatalf("patch: %d %s", rec.Code, rec.Body)
 		}
 	default:

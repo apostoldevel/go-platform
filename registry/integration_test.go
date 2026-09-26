@@ -16,7 +16,7 @@ import (
 )
 
 func live(t *testing.T) *resttest.Live {
-	return resttest.Start(t, "go-registry-test", func(r *pgtx.Runner) platform.Module { return New(Config{Doer: r}) })
+	return resttest.Start(t, "go-registry-test", func(r resttest.Doer) platform.Module { return New(Config{Doer: r}) })
 }
 
 func TestIntegration_RegistryLifecycle(t *testing.T) {
@@ -48,7 +48,7 @@ func TestIntegration_RegistryLifecycle(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &values); err != nil || rec.Code != 200 || len(values) != 3 {
 		t.Fatalf("enum values: %d %s", rec.Code, rec.Body)
 	}
-	if !resttest.SameJSON(rec.Body.Bytes(), l.Direct(t, "SELECT coalesce(json_agg(row_to_json(t)), '[]') FROM api.registry_enum_value_ex($1, $2) t", "CURRENT_USER", sub)) {
+	if !resttest.SameJSON(rec.Body.Bytes(), l.Rows(t, "registry_enum_value_ex", pgtx.Args{"key": "CURRENT_USER", "subkey": sub})) {
 		t.Fatalf("enum parity: %s", rec.Body)
 	}
 	// the key tree as the panel reads it; the path of the value's key

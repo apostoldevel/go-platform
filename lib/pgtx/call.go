@@ -94,13 +94,17 @@ func callSQL(fn string, args Args) (string, []any, error) {
 	return "SELECT to_json(t) FROM api." + name + "(" + strings.Join(parts, ", ") + ") t", vals, nil
 }
 
-// Call runs one function of schema api inside the request's transaction
+// Call runs one function of schema api inside the request's transaction —
+// through daemon.call on the daemon road, as a direct named call before it —
 // and returns its rows as JSON: a row of a SETOF composite is an object, a
 // scalar is its value, void is one row whose value means nothing; no rows is
 // an empty, non-nil slice. This is the only way the platform's
 // packages reach the database — under the daemon role there is no text of
 // SQL to send over schema api, only the call.
 func Call(ctx context.Context, tx pgx.Tx, fn string, args Args) ([]json.RawMessage, error) {
+	if onDaemonRoad(ctx, tx) {
+		return callDaemon(ctx, tx, fn, args)
+	}
 	sql, vals, err := callSQL(fn, args)
 	if err != nil {
 		return nil, err

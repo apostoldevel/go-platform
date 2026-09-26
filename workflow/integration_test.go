@@ -15,7 +15,7 @@ import (
 )
 
 func live(t *testing.T) *resttest.Live {
-	return resttest.Start(t, "go-workflow-test", func(r *pgtx.Runner) platform.Module { return New(Config{Doer: r}) })
+	return resttest.Start(t, "go-workflow-test", func(r resttest.Doer) platform.Module { return New(Config{Doer: r}) })
 }
 
 // Reads of every catalogue with parity of one row each; the constructor's
@@ -28,7 +28,7 @@ func TestIntegration_CataloguesAndClassScopedReads(t *testing.T) {
 		p := resttest.ListOf(t, l.Call("GET", "/api/v2/"+res.path+"?page[limit]=3", ""), res.path)
 		id, _ := p.Items[0]["id"].(string)
 		rec := l.Call("GET", "/api/v2/"+res.path+"/"+id, "")
-		if rec.Code != 200 || !resttest.SameJSON(rec.Body.Bytes(), l.Direct(t, "SELECT row_to_json(t) FROM "+res.getFn+"($1::uuid) t", id)) {
+		if rec.Code != 200 || !resttest.SameJSON(rec.Body.Bytes(), l.Row(t, res.getFn, pgtx.Args{"id": id})) {
 			t.Fatalf("%s/%s parity: %d %s", res.path, id, rec.Code, rec.Body)
 		}
 		if rec.Header().Get("ETag") == "" {
@@ -43,7 +43,7 @@ func TestIntegration_CataloguesAndClassScopedReads(t *testing.T) {
 	}
 	// rights of the class: who holds what, and the caller's own bits decoded
 	rec := l.Call("GET", "/api/v2/classes/"+class+"/access", "")
-	if rec.Code != 200 || !strings.HasPrefix(rec.Body.String(), "[") || !resttest.SameJSON(rec.Body.Bytes(), l.Direct(t, "SELECT coalesce(json_agg(row_to_json(t)), '[]') FROM api.class_access($1::uuid) t", class)) {
+	if rec.Code != 200 || !strings.HasPrefix(rec.Body.String(), "[") || !resttest.SameJSON(rec.Body.Bytes(), l.Rows(t, "class_access", pgtx.Args{"id": class})) {
 		t.Fatalf("class access: %d %s", rec.Code, rec.Body)
 	}
 	rec = l.Call("GET", "/api/v2/classes/"+class+"/access/decode", "")
@@ -58,15 +58,12 @@ func TestIntegration_CataloguesAndClassScopedReads(t *testing.T) {
 	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &bits) != nil || len(bits) != 3 {
 		t.Fatalf("method access decode: %d %s", rec.Code, rec.Body)
 	}
-	// the two type catalogues: a view, read as the pool's role — see admin's area-types
-	var granted bool
-	_ = json.Unmarshal(l.Direct(t, "SELECT to_json(has_table_privilege(current_user, 'api.state_type', 'SELECT'))"), &granted)
+	// state types: the module calls api.list_state_type (limit 0 — all of
+	// them) and no longer reads the view api.state_type, so there is no
+	// privilege on the view to probe; the reference is the same function
 	rec = l.Call("GET", "/api/v2/state-types", "")
-	if granted && (rec.Code != 200 || !resttest.SameJSON(rec.Body.Bytes(), l.Direct(t, "SELECT coalesce(json_agg(row_to_json(t)), '[]') FROM api.state_type t"))) {
+	if rec.Code != 200 || !resttest.SameJSON(rec.Body.Bytes(), l.Rows(t, "list_state_type", pgtx.Args{"limit": 0})) {
 		t.Fatalf("state-types: %d %s", rec.Code, rec.Body)
-	}
-	if !granted {
-		t.Log("api.state_type is not granted to the pool's role — GET /api/v2/state-types and /event-types answer 500 until the database grants SELECT on api.* views")
 	}
 	stateTypes := resttest.ListOf(t, l.Call("GET", "/api/v2/states?page[limit]=1", ""), "a state")
 	st, _ := stateTypes.Items[0]["type"].(string)
@@ -98,7 +95,7 @@ func TestIntegration_TypeLifecycle(t *testing.T) {
 		t.Fatalf("replay: %d %v", again.Code, again.Header())
 	}
 	rec = l.Call("GET", "/api/v2/types/"+id, "")
-	if rec.Code != 200 || !resttest.SameJSON(rec.Body.Bytes(), l.Direct(t, "SELECT row_to_json(t) FROM api.get_type($1::uuid) t", id)) {
+	if rec.Code != 200 || !resttest.SameJSON(rec.Body.Bytes(), l.Row(t, "get_type", pgtx.Args{"id": id})) {
 		t.Fatalf("parity: %d %s", rec.Code, rec.Body)
 	}
 	if st := l.Call("PATCH", "/api/v2/types/"+id, `{"name":"Renamed"}`, "If-Match", `W/"stale"`); st.Code != 412 {

@@ -13,7 +13,7 @@ import (
 )
 
 func live(t *testing.T) *resttest.Live {
-	return resttest.Start(t, "go-notification-test", func(r *pgtx.Runner) platform.Module { return New(Config{Doer: r}) })
+	return resttest.Start(t, "go-notification-test", func(r resttest.Doer) platform.Module { return New(Config{Doer: r}) })
 }
 
 // The newest notification: read by id with parity; its object comes back
@@ -39,14 +39,14 @@ func TestIntegration_ListGetSinceChanged(t *testing.T) {
 		o, _ := n["object"].(string)
 		e, _ := n["entitycode"].(string)
 		fn, ok := getFnOf(e)
-		if ok && resttest.SameJSON(l.Direct(t, "SELECT to_json(count(*) > 0) FROM "+fn+"($1::uuid) t WHERE t.id IS NOT NULL", o), []byte("true")) {
+		if ok && readable(t, l, fn, o) {
 			if id == "" {
 				id, _ = n["id"].(string)
 				object, entity = o, e
 			}
 			continue
 		}
-		if hidden == "" && resttest.SameJSON(l.Direct(t, "SELECT to_json(count(*) > 0) FROM api.get_object($1::uuid)", o), []byte("true")) {
+		if hidden == "" && len(rows(t, l, "get_object", o)) > 0 {
 			hidden = o
 		}
 	}
@@ -65,8 +65,9 @@ func TestIntegration_ListGetSinceChanged(t *testing.T) {
 	if id == "" {
 		t.Skip("none of the 100 newest notifications points at an object the caller reads")
 	}
+	// the module reads the caller's own notifications: api.get_my_notification
 	rec := l.Call("GET", "/api/v2/notifications/"+id, "")
-	if rec.Code != 200 || !resttest.SameJSON(rec.Body.Bytes(), l.Direct(t, "SELECT row_to_json(t) FROM api.get_notification($1::uuid) t", id)) {
+	if rec.Code != 200 || !resttest.SameJSON(rec.Body.Bytes(), l.Row(t, "get_my_notification", pgtx.Args{"id": id})) {
 		t.Fatalf("get parity: %d %s", rec.Code, rec.Body)
 	}
 	// the last hour only: the journal is millions of rows on a working database
@@ -76,16 +77,17 @@ func TestIntegration_ListGetSinceChanged(t *testing.T) {
 	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &since) != nil {
 		t.Fatalf("since: %d %s", rec.Code, rec.Body)
 	}
-	// the journal grows while the test runs: the later api.* answer is a superset of the earlier v2 one
+	// the journal grows while the test runs: the later api.* answer is a superset of the earlier v2 one;
+	// the module's /since is api.my_notification(from), the caller's own
 	var direct []map[string]any
-	_ = json.Unmarshal(l.Direct(t, "SELECT coalesce(json_agg(row_to_json(t)), '[]') FROM api.notification($1::timestamptz) t", from), &direct)
+	_ = json.Unmarshal(l.Rows(t, "my_notification", pgtx.Args{"datefrom": from}), &direct)
 	ids := map[any]bool{}
 	for _, d := range direct {
 		ids[d["id"]] = true
 	}
 	for _, n := range since {
 		if !ids[n["id"]] {
-			t.Fatalf("since parity: %v not in api.notification (%d vs %d rows)", n["id"], len(since), len(direct))
+			t.Fatalf("since parity: %v not in api.my_notification (%d vs %d rows)", n["id"], len(since), len(direct))
 		}
 	}
 	rec = l.Call("GET", "/api/v2/notifications/changed?objects="+object+"&from=2000-01-01T00:00:00Z", "")
@@ -93,11 +95,36 @@ func TestIntegration_ListGetSinceChanged(t *testing.T) {
 	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &changed) != nil || len(changed) != 1 {
 		t.Fatalf("changed: %d %s", rec.Code, rec.Body)
 	}
-	if !resttest.SameJSON(changed[0], l.Direct(t, "SELECT row_to_json(t) FROM api.get_"+entity+"($1::uuid) t", object)) {
+	if !resttest.SameJSON(changed[0], l.Row(t, "get_"+entity, pgtx.Args{"id": object})) {
 		t.Fatalf("changed parity (%s): %s", entity, changed[0])
 	}
 	// a period before any notification: no objects, still an array
 	if rec = l.Call("GET", "/api/v2/notifications/changed?objects="+object+"&to=2000-01-01T00:00:00Z", ""); rec.Code != 200 || rec.Body.String() != "[]" {
 		t.Fatalf("changed empty: %d %s", rec.Code, rec.Body)
 	}
+}
+
+// rows is fn(id) through the module's road, failing the test on a refusal.
+func rows(t *testing.T, l *resttest.Live, fn, id string) []json.RawMessage {
+	t.Helper()
+	out, err := l.Try(fn, pgtx.Args{"id": id})
+	if err != nil {
+		t.Fatalf("%s: %v", fn, err)
+	}
+	return out
+}
+
+// readable is what count(*) > 0 … WHERE t.id IS NOT NULL said in SQL: fn(id)
+// has a row with an id — the caller reads the object through its entity.
+func readable(t *testing.T, l *resttest.Live, fn, id string) bool {
+	t.Helper()
+	for _, row := range rows(t, l, fn, id) {
+		var r struct {
+			ID *string `json:"id"`
+		}
+		if json.Unmarshal(row, &r) == nil && r.ID != nil {
+			return true
+		}
+	}
+	return false
 }

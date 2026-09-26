@@ -206,13 +206,13 @@ func (m *module) Routes(mux *http.ServeMux) {
 		mux.HandleFunc("GET "+ro.Prefix, ro.List(d, log))
 		mux.HandleFunc("GET "+ro.Prefix+"/{id}", ro.Get(d, log))
 	}
-	for _, ct := range []struct {
-		res  rest.Resource
-		view string
-	}{{stateTypes, "api.state_type"}, {eventTypes, "api.event_type"}} {
-		mux.HandleFunc("GET "+ct.res.Prefix, rest.RowsHandler(d, log, "SELECT row_to_json(t) FROM "+ct.view+" t")) // the view is read as the pool's role: without GRANT SELECT to it, 500
-		mux.HandleFunc("GET "+ct.res.Prefix+"/{id}", ct.res.Get(d, log))
-	}
+	mux.HandleFunc("GET "+stateTypes.Prefix, rest.CallRowsHandler(d, log, "list_state_type", pgtx.Args{"limit": 0}))
+	mux.HandleFunc("GET "+stateTypes.Prefix+"/{id}", stateTypes.Get(d, log))
+	// the view api.event_type has no list function yet (db-platform 1.2.31):
+	// read as the pool's role, which under daemon has no USAGE on schema api
+	// — 500 on the daemon road until list_event_type lands
+	mux.HandleFunc("GET "+eventTypes.Prefix, rest.RowsHandler(d, log, "SELECT row_to_json(t) FROM api.event_type t"))
+	mux.HandleFunc("GET "+eventTypes.Prefix+"/{id}", eventTypes.Get(d, log))
 	for _, rw := range []rest.Writable{types, classes, states, methods, transitions, events} {
 		rw.Routes(mux, d, m.idem, log)
 	}

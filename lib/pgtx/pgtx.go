@@ -1,4 +1,18 @@
-// Package pgtx runs one HTTP request as one database transaction:
+// Package pgtx runs one HTTP request as one database transaction. Where the
+// connection's role may call daemon.begin/call/end (db-platform 1.2.31, the
+// daemon role) the database opens, guards and journals the request itself:
+//
+//	BEGIN
+//	  SELECT * FROM daemon.begin($token, $agent, $host, $method, $path, $payload, $request_id)
+//	  SAVEPOINT request
+//	  … the handler's daemon.call(fn, args) …
+//	  [ROLLBACK TO SAVEPOINT request]      -- on a refusal
+//	  SELECT * FROM daemon.end($status, $message)
+//	COMMIT
+//
+// begin verifies the token, opens the session context and runs the guard of
+// the route; a refusal there is already journalled and commits alone. Before
+// 1.2.31, or under a role without the daemon functions:
 //
 //	BEGIN
 //	  SELECT * FROM api.authorize_local($sub, $agent, $host)
@@ -31,6 +45,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/apostoldevel/go-platform/lib/problem"
@@ -40,10 +55,13 @@ import (
 )
 
 // Session identifies the caller: the session code from the verified JWT's
-// `sub`, the client's User-Agent and address (the host decides it from
-// X-Forwarded-For and the peer; platform.Config.TrustedProxies).
+// `sub`, the bearer token itself (daemon.begin verifies it again — the
+// database trusts no code it did not check), the client's User-Agent and
+// address (the host decides it from X-Forwarded-For and the peer;
+// platform.Config.TrustedProxies).
 type Session struct {
 	Code  string
+	Token string
 	Agent string
 	Host  string
 }
@@ -55,6 +73,10 @@ type Features struct {
 	LogRequest     bool // api.log_request(method, path, payload, status, runtime, request_id)
 	LogRequestErr  bool // … plus a seventh pError (db-platform 1.2.24): the catalogue code of a refusal, under _request.error
 	ParseMessage   bool // api.parse_message — the catalogue cut done by the database
+	// Daemon: daemon.begin, call, end, error and routes (db-platform 1.2.31)
+	// exist and the connection's role may execute them — the request road
+	// Do takes, and the only one open to the daemon role
+	Daemon bool
 }
 
 // Runner holds the pool and what the database offers.
@@ -66,6 +88,8 @@ type Runner struct {
 	// itself (problem.Code*), read once at Detect — a refusal never asks the
 	// database for its own wording
 	titles map[string]string
+	// looked: catalogueTitle's answers for the other codes, one lookup each
+	looked sync.Map
 }
 
 // titleCodes are the codes Detect reads the catalogue messages of.
@@ -106,17 +130,30 @@ func (r *Request) status() int {
 	return r.Status
 }
 
-// proc is one api.* function as pg_proc lists it: its name and how many
-// parameters it declares — the shape of a signature that grew (log_request:
-// six before 1.2.24, seven since) is read off the database, not off a flag.
+// proc is one function of the request road as pg_proc lists it: its schema
+// and name, how many parameters it declares — the shape of a signature that
+// grew (log_request: six before 1.2.24, seven since) is read off the
+// database, not off a flag — and whether the connection's role may call it.
 type proc struct {
-	name  string
-	nargs int
+	schema string
+	name   string
+	nargs  int
+	exec   bool
 }
 
-// Detect asks pg_proc which gateway-patch functions exist, and in which shape.
+// daemonRoad are the functions of the daemon road; all of them, callable,
+// or the road is not taken.
+var daemonRoad = []string{"begin", "call", "end", "error", "routes"}
+
+// Detect asks pg_proc which functions of the request road exist, in which
+// shape, and which of them the connection's role may execute — the catalogue
+// reads under any role.
 func (r *Runner) Detect(ctx context.Context) error {
-	rows, err := r.Pool.Query(ctx, "SELECT proname, pronargs FROM pg_proc WHERE pronamespace = 'api'::regnamespace AND proname IN ('authorize_local', 'log_request', 'parse_message')")
+	rows, err := r.Pool.Query(ctx, `SELECT n.nspname, p.proname, p.pronargs,
+	       has_schema_privilege(p.pronamespace, 'USAGE') AND has_function_privilege(p.oid, 'EXECUTE')
+	  FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+	 WHERE n.nspname = 'api' AND p.proname IN ('authorize_local', 'log_request', 'parse_message')
+	    OR n.nspname = 'daemon' AND p.proname = ANY ($1)`, daemonRoad)
 	if err != nil {
 		return err
 	}
@@ -124,7 +161,7 @@ func (r *Runner) Detect(ctx context.Context) error {
 	var procs []proc
 	for rows.Next() {
 		var p proc
-		if err := rows.Scan(&p.name, &p.nargs); err != nil {
+		if err := rows.Scan(&p.schema, &p.name, &p.nargs, &p.exec); err != nil {
 			return err
 		}
 		procs = append(procs, p)
@@ -149,7 +186,11 @@ func (r *Runner) loadTitles(ctx context.Context) {
 			r.Logger.Warn("catalogue titles not read", "err", err)
 		}
 	}
-	rows, err := r.Pool.Query(ctx, "SELECT e.code, e.message FROM unnest($1::text[]) c, api.get_error_by_code(c) e", titleCodes)
+	sql := "SELECT e.code, e.message FROM unnest($1::text[]) c, api.get_error_by_code(c) e"
+	if r.Features.Daemon {
+		sql = "SELECT c, e->>'message' FROM unnest($1::text[]) c, daemon.error(c) e"
+	}
+	rows, err := r.Pool.Query(ctx, sql, titleCodes)
 	if err != nil {
 		warn(err)
 		return
@@ -176,7 +217,12 @@ func (r *Runner) loadTitles(ctx context.Context) {
 
 func featuresFrom(procs []proc) Features {
 	var f Features
+	road := map[string]bool{}
 	for _, p := range procs {
+		if p.schema == "daemon" {
+			road[p.name] = road[p.name] || p.exec
+			continue
+		}
 		switch p.name {
 		case "authorize_local":
 			f.AuthorizeLocal = true
@@ -189,6 +235,10 @@ func featuresFrom(procs []proc) Features {
 		case "parse_message":
 			f.ParseMessage = true
 		}
+	}
+	f.Daemon = true
+	for _, name := range daemonRoad {
+		f.Daemon = f.Daemon && road[name]
 	}
 	return f
 }
@@ -219,6 +269,9 @@ func NewPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 // *problem.Problem when the request failed for the client's reasons, so the
 // handler can write it as is.
 func (r *Runner) Do(ctx context.Context, s Session, req *Request, fn func(ctx context.Context, tx pgx.Tx) error) error {
+	if r.Features.Daemon {
+		return r.doDaemon(ctx, s, req, fn)
+	}
 	started := time.Now()
 	if req != nil {
 		req.LogID = 0
@@ -402,6 +455,11 @@ func (r *Runner) explain(ctx context.Context, req *Request, err error) error {
 	case kindProblem:
 		return err
 	case kindCatalogue:
+		if r.Features.Daemon {
+			// the text is cut here the way kernel.ParseMessage cuts it; the
+			// catalogue answers without a session
+			return problem.FromCode(code, r.catalogueTitle(ctx, code, detail), detail)
+		}
 		title := detail
 		if r.Pool != nil {
 			lookup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)

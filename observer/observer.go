@@ -72,21 +72,13 @@ func (m *module) Routes(mux *http.ServeMux) {
 		code, err := codeOf(r, "code")
 		return pgtx.Args{"code": code}, err
 	}))
-	// the session is the caller's, taken from the request, never from the
-	// path. The filter by the caller's session is Go's here (api.listener has
-	// none, and carries the session code) until the database gives a list of
-	// the caller's own listeners; the session column is never answered, and
-	// an empty session reads nothing (the search language drops an empty value).
+	// the caller's own listeners: api.list_my_listener / get_my_listener
+	// (db-platform 1.2.31) take the session from the context the database
+	// opened, never from the request — and do not answer the session code
 	mux.HandleFunc("GET "+prefix+"/listeners", func(w http.ResponseWriter, r *http.Request) {
-		code := platform.SessionOf(r).Code
-		if code == "" {
-			rest.WriteJSON(w, 200, []byte("[]"))
-			return
-		}
-		search, _ := json.Marshal([]map[string]any{{"field": "session", "compare": "EQL", "value": code}})
 		var rows []json.RawMessage
 		err := d.Do(r.Context(), platform.SessionOf(r), rest.ReqOf(r, 200, nil), func(ctx context.Context, tx pgx.Tx) (err error) {
-			rows, err = pgtx.Call(ctx, tx, "list_listener", pgtx.Args{"search": json.RawMessage(search), "orderby": json.RawMessage(`["publisher ASC","identity ASC"]`), "limit": 0})
+			rows, err = pgtx.Call(ctx, tx, "list_my_listener", nil)
 			return err
 		})
 		if err != nil {
@@ -111,9 +103,9 @@ func (m *module) Routes(mux *http.ServeMux) {
 		if err != nil {
 			return nil, err
 		}
-		return pgtx.Args{"publisher": publisher, "session": platform.SessionOf(r).Code, "identity": identity}, nil
+		return pgtx.Args{"publisher": publisher, "identity": identity}, nil
 	}, func(ctx context.Context, tx pgx.Tx, a pgtx.Args) (json.RawMessage, error) {
-		row, err := pgtx.CallRow(ctx, tx, "get_listener", a)
+		row, err := pgtx.CallRow(ctx, tx, "get_my_listener", a)
 		if err != nil {
 			return nil, err
 		}

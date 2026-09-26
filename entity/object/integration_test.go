@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http/httptest"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -16,7 +17,7 @@ import (
 )
 
 func live(t *testing.T) *resttest.Live {
-	return resttest.Start(t, "go-object-test", func(r *pgtx.Runner) platform.Module { return New(Config{Doer: r}) })
+	return resttest.Start(t, "go-object-test", func(r resttest.Doer) platform.Module { return New(Config{Doer: r}) })
 }
 
 // One object of any entity: its generic row, the methods of its state, the
@@ -29,17 +30,23 @@ func TestIntegration_ObjectMethodsSearchAndRefusedRuns(t *testing.T) {
 	entity, _ := p.Items[0]["entitycode"].(string)
 	label, _ := p.Items[0]["label"].(string)
 	rec := l.Call("GET", "/api/v2/objects/"+id, "")
-	if rec.Code != 200 || !resttest.SameJSON(rec.Body.Bytes(), l.Direct(t, "SELECT row_to_json(t) FROM api.get_object($1::uuid) t", id)) {
+	if rec.Code != 200 || !resttest.SameJSON(rec.Body.Bytes(), l.Row(t, "get_object", pgtx.Args{"id": id})) {
 		t.Fatalf("get parity: %d %s", rec.Code, rec.Body)
 	}
 	rec = l.Call("GET", "/api/v2/objects/"+id+"/methods", "")
-	if rec.Code != 200 || !resttest.SameJSON(rec.Body.Bytes(), l.Direct(t, "SELECT coalesce(json_agg(row_to_json(t) ORDER BY t.sequence), '[]') FROM api.get_object_methods($1::uuid) t", id)) {
+	if rec.Code != 200 || !resttest.SameJSON(rec.Body.Bytes(), bySequence(t, l.Rows(t, "get_object_methods", pgtx.Args{"object": id}))) {
 		t.Fatalf("methods parity: %d %s", rec.Code, rec.Body)
 	}
 	if word := strings.Fields(label); len(word) > 0 {
 		q := url.QueryEscape(word[0])
 		rec = l.Call("GET", "/api/v2/search?q="+q+"&entities="+entity, "")
-		if rec.Code != 200 || !resttest.SameJSON(rec.Body.Bytes(), l.Direct(t, "SELECT coalesce(json_agg(row_to_json(t)), '[]') FROM api.search($1, $2::jsonb, (SELECT code FROM api.current_locale())) t", word[0], `["`+entity+`"]`)) {
+		// the locale of the session, as (SELECT code FROM api.current_locale()) gave it
+		var locale struct {
+			Code string `json:"code"`
+		}
+		_ = json.Unmarshal(l.Row(t, "current_locale", nil), &locale)
+		want := l.Rows(t, "search", pgtx.Args{"text": word[0], "entities": json.RawMessage(`["` + entity + `"]`), "localecode": locale.Code})
+		if rec.Code != 200 || locale.Code == "" || !resttest.SameJSON(rec.Body.Bytes(), want) {
 			t.Fatalf("search parity: %d %s", rec.Code, rec.Body)
 		}
 		if !strings.Contains(rec.Body.String(), `"id":"`+id+`"`) {
@@ -74,22 +81,27 @@ func TestIntegration_ObjectAccess(t *testing.T) {
 	p := resttest.ListOf(t, l.Call("GET", "/api/v2/objects?filter[statetypecode]=enabled&page[limit]=1", ""), "an enabled object")
 	id, _ := p.Items[0]["id"].(string)
 	rec := l.Call("GET", "/api/v2/objects/"+id+"/access", "")
-	if rec.Code != 200 || !resttest.SameJSON(rec.Body.Bytes(), l.Direct(t, "SELECT coalesce(json_agg(row_to_json(t)), '[]') FROM api.object_access($1::uuid) t", id)) {
+	if rec.Code != 200 || !resttest.SameJSON(rec.Body.Bytes(), l.Rows(t, "object_access", pgtx.Args{"id": id})) {
 		t.Fatalf("entries parity: %d %s", rec.Code, rec.Body)
 	}
-	rec = l.Call("GET", "/api/v2/objects/"+id+"/access/decode", "")
-	var bits struct{ S, U, D *bool }
-	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &bits) != nil || bits.S == nil || !*bits.S || !resttest.SameJSON(rec.Body.Bytes(), l.Direct(t, "SELECT row_to_json(t) FROM api.decode_object_access($1::uuid, api.current_userid()) t", id)) {
-		t.Fatalf("decode parity: %d %s", rec.Code, rec.Body)
-	}
+	// the caller: api.current_user()'s id — api.current_userid() is not in
+	// daemon.call's allow list, and for the session's own user they are one
 	var me struct {
 		User struct {
 			ID string `json:"id"`
 		} `json:"user"`
 	}
-	_ = json.Unmarshal(l.Direct(t, "SELECT json_build_object('user', row_to_json(t)) FROM api.current_user() t"), &me)
+	_ = json.Unmarshal(l.Row(t, "current_user", nil), &me.User)
+	if me.User.ID == "" {
+		t.Fatal("api.current_user: no id")
+	}
+	rec = l.Call("GET", "/api/v2/objects/"+id+"/access/decode", "")
+	var bits struct{ S, U, D *bool }
+	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &bits) != nil || bits.S == nil || !*bits.S || !resttest.SameJSON(rec.Body.Bytes(), l.Row(t, "decode_object_access", pgtx.Args{"id": id, "userid": me.User.ID})) {
+		t.Fatalf("decode parity: %d %s", rec.Code, rec.Body)
+	}
 	rec = l.Call("GET", "/api/v2/objects/"+id+"/access/decode?userid="+me.User.ID, "")
-	if rec.Code != 200 || !resttest.SameJSON(rec.Body.Bytes(), l.Direct(t, "SELECT row_to_json(t) FROM api.decode_object_access($1::uuid, $2::uuid) t", id, me.User.ID)) {
+	if rec.Code != 200 || !resttest.SameJSON(rec.Body.Bytes(), l.Row(t, "decode_object_access", pgtx.Args{"id": id, "userid": me.User.ID})) {
 		t.Fatalf("decode by userid: %d %s", rec.Code, rec.Body)
 	}
 	// a grant of the full mask to the caller, then the caller's own entry
@@ -99,7 +111,7 @@ func TestIntegration_ObjectAccess(t *testing.T) {
 		Type   string `json:"type"`
 		Mask   int    `json:"mask"`
 	}
-	_ = json.Unmarshal(l.Direct(t, "SELECT coalesce(json_agg(row_to_json(t)), '[]') FROM api.object_access($1::uuid) t", id), &entries)
+	_ = json.Unmarshal(l.Rows(t, "object_access", pgtx.Args{"id": id}), &entries)
 	restore := `{"userid":"` + me.User.ID + `","mask":0}`
 	for _, e := range entries {
 		if e.UserID == me.User.ID && e.Type == "U" {
@@ -167,12 +179,20 @@ func TestIntegration_ObjectFiles(t *testing.T) {
 	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &page) != nil || page.Total != 1 || len(page.Items) != 1 || page.Items[0]["file"] != file || page.Items[0]["path"] != nil {
 		t.Fatalf("list: %d %s", rec.Code, rec.Body)
 	}
-	if !resttest.SameJSON([]byte(`[`+string(mustJSON(page.Items[0]))+`]`), l.Direct(t, "SELECT json_agg(json_build_object('file', t.file, 'name', t.name, 'size', t.size)) FROM api.list_object_file($1::jsonb, NULL, NULL, NULL, NULL) t", `[{"field":"object","compare":"EQL","value":"`+id+`"}]`)) {
+	// v1: api.list_object_file by the object, projected to the three fields
+	// asked for (what json_build_object('file', 'name', 'size') did in SQL)
+	var v1 []struct {
+		File any `json:"file"`
+		Name any `json:"name"`
+		Size any `json:"size"`
+	}
+	_ = json.Unmarshal(l.Rows(t, "list_object_file", pgtx.Args{"search": json.RawMessage(`[{"field":"object","compare":"EQL","value":"` + id + `"}]`)}), &v1)
+	if !resttest.SameJSON([]byte(`[`+string(mustJSON(page.Items[0]))+`]`), mustJSON(v1)) {
 		t.Fatalf("list parity: %s", rec.Body)
 	}
 	rec = l.Call("GET", "/api/v2/objects/"+id+"/files/"+file, "")
 	var got map[string]any
-	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &got) != nil || got["data"] != "aGVsbG8=" || !resttest.SameJSON(rec.Body.Bytes(), l.Direct(t, "SELECT row_to_json(t) FROM api.get_object_file($1::uuid, $2::uuid, NULL, NULL) t", id, file)) {
+	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &got) != nil || got["data"] != "aGVsbG8=" || !resttest.SameJSON(rec.Body.Bytes(), l.Row(t, "get_object_file", pgtx.Args{"object": id, "file": file, "name": nil, "path": nil})) {
 		t.Fatalf("get: %d %s", rec.Code, rec.Body)
 	}
 	if rec = l.Call("DELETE", "/api/v2/objects/"+id+"/files/"+file, ""); rec.Code != 204 {
@@ -192,3 +212,22 @@ func TestIntegration_ObjectFiles(t *testing.T) {
 }
 
 func mustJSON(v any) []byte { b, _ := json.Marshal(v); return b }
+
+// bySequence is a JSON array of rows ordered by their "sequence", stably —
+// what ORDER BY t.sequence did over the rows in SQL.
+func bySequence(t *testing.T, rows json.RawMessage) []byte {
+	t.Helper()
+	var items []map[string]any
+	if err := json.Unmarshal(rows, &items); err != nil {
+		t.Fatalf("rows: %v", err)
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		a, _ := items[i]["sequence"].(float64)
+		b, _ := items[j]["sequence"].(float64)
+		return a < b
+	})
+	if items == nil {
+		return []byte("[]")
+	}
+	return mustJSON(items)
+}

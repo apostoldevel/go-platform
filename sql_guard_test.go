@@ -20,14 +20,13 @@ var pending = map[string]struct {
 	n   int
 	why string
 }{
-	"admin/collections.go:collectionRoutes": {2, "views api.area_type, api.locale — read by function once db-platform has list_area_type, list_locale"},
-	"workflow/workflow.go:Routes":           {1, "views api.state_type, api.event_type — read by function once db-platform has list_state_type, list_event_type"},
-	"lib/rest/rest.go:Rows":                 {1, "deprecated: kept for the projects that have not moved to pgtx.Call"},
-	"lib/rest/rest.go:RowsOf":               {1, "deprecated, over Rows"},
-	"lib/rest/rest.go:RowsHandler":          {1, "deprecated, over RowsOf"},
-	"lib/rest/rest.go:RowHandler":           {1, "deprecated: kept for the projects that have not moved to pgtx.Call"},
-	"internal/resttest/resttest.go:Direct":  {1, "the test harness's parity reference, not a route; moves to daemon.call with the daemon role"},
-	"internal/resttest/resttest.go:Start":   {2, "mints and signs out a test session on the administrator's DSN — the test's own connection, never the service's; stays"},
+	"workflow/workflow.go:Routes":  {1, "view api.event_type — read by function once db-platform has list_event_type (1.2.31 has list_state_type only)"},
+	"lib/rest/rest.go:Rows":        {1, "deprecated: kept for the projects that have not moved to pgtx.Call"},
+	"lib/rest/rest.go:RowsOf":      {1, "deprecated, over Rows"},
+	"lib/rest/rest.go:RowsHandler": {1, "deprecated, over RowsOf"},
+	"lib/rest/rest.go:RowHandler":  {1, "deprecated: kept for the projects that have not moved to pgtx.Call"},
+
+	"internal/resttest/resttest.go:Start": {2, "mints and signs out a test session on the administrator's DSN — the test's own connection, never the service's; stays"},
 }
 
 // Under the daemon role there is no text of SQL to send over schema api —

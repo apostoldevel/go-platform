@@ -45,7 +45,7 @@ lib/
   auth/jwt/            проверка HS256/384/512 секретами OAuth2-провайдеров; Keyring, Claims
   gateway/frame/       кадр плоскости управления {t,u,a,p,c,m}: CALL, CALLRESULT, CALLERROR; предел 64 KiB
   gatewayclient/       подключение, /register, heartbeat, /status, /unregister; /ping, /drain, /reload; переподключение
-  pgtx/                один запрос = одна транзакция: api.authorize → SAVEPOINT → api.* → api.log_request → COMMIT; отказ тоже журналируется
+  pgtx/                один запрос = одна транзакция: daemon.begin → SAVEPOINT → daemon.call … → daemon.end → COMMIT (роль daemon, db-platform 1.2.31); отказ тоже журналируется
   problem/             application/problem+json с каталогом ошибок базы
   query/               ?filter[…]&sort=&fields=&page[limit]= → jsonb search/orderby/fields для api.sql()
   rest/                форма ресурса: список, строка + ETag, create/update/delete, Idempotency-Key, If-Match
@@ -90,7 +90,21 @@ func (m *module) get(w http.ResponseWriter, r *http.Request) {
 Путь запроса
 -
 
-Один HTTP-запрос — одна транзакция базы (`lib/pgtx`):
+Один HTTP-запрос — одна транзакция базы (`lib/pgtx`). Под ролью `daemon` на db-platform 1.2.31 запрос открывает, охраняет и журналирует сама база. `Runner.Detect` выбирает эту дорогу, когда есть все пять функций — `daemon.begin`, `call`, `end`, `error`, `routes` — и роль может их исполнять:
+
+```
+BEGIN
+  SELECT * FROM daemon.begin($token, $agent, $host, $method, $path, $payload, $request_id)
+  SAVEPOINT request
+  … вызовы обработчика: pgtx.Call → daemon.call($fn, $args) …
+  [ROLLBACK TO SAVEPOINT request]                        -- при отказе
+  SELECT * FROM daemon.end($status, $message)
+COMMIT
+```
+
+`daemon.begin` заново проверяет bearer-токен (`TokenValidation`: база не верит коду, который не проверила сама), открывает контекст сессии на уровне транзакции и исполняет хук маршрута. Путь без хука — `403 ERR-403-010`: дорога закрыта по умолчанию. Такой отказ уже записан в журнал и коммитится один, обработчик не запускается. `daemon.call` пускает только к функциям схемы `api` из разрешённого списка (иначе `ERR-403-012`). Перед каждым вызовом он восстанавливает контекст запроса — всё, что соединение поставило между вызовами, перетирается — и выбирает зарегистрированную форму функции по ключам аргументов. `daemon.end` дописывает строку журнала: статус на проводе и код каталога при отказе. Заголовки каталога берутся из `daemon.error`, без сессии. `Runner.Routes` читает `daemon.routes('v2')`, чтобы процесс не объявлял префикс, на котором нет ни одного маршрута (`platform.OpenPrefixes`). `lib/pgtx/pgtxtest` чеканит тестовую сессию с токеном, выданным базой.
+
+До 1.2.31 или под ролью без функций `daemon` (прямая дорога):
 
 ```
 BEGIN
@@ -216,7 +230,7 @@ mods := []platform.Module{
 handler, err := platform.New(platform.Config{Keys: keys, InFlight: &inFlight}, mods...)
 ```
 
-**База данных.** Версия db-platform, названная в `platform.DBPlatform`, с модулем `gateway` (`api.authorize_local`, `api.log_request`) для пути «сессия на транзакцию»; без него библиотека откатывается на `api.authorize` и ничего не журналирует.
+**База данных.** Версия db-platform, названная в `platform.DBPlatform`; подключение ролью `daemon`, дорога — `daemon.begin/call/end` (1.2.31). До этой версии путь «сессия на транзакцию» по прямой дороге даёт модуль `gateway` (`api.authorize_local`, `api.log_request`). Без того и другого библиотека откатывается на `api.authorize` и ничего не журналирует.
 
 **Шлюз.** [Gateway API](https://github.com/apostoldevel/module-GatewayAPI) в worker-процессе Апостола, с сетью модуля в его `allowed_cidr`. Без шлюза модуль всё равно отвечает на `/api/v2/*` по своему адресу; плоскость управления для локального запуска играет `cmd/gatewaystub`:
 
@@ -231,11 +245,12 @@ go run ./cmd/gatewaystub -addr 127.0.0.1:4978 -secret stub-secret -audience gate
 go build ./... && go vet ./... && gofmt -l . && go test ./... -count=1 -race
 ```
 
-Интеграционные тесты идут на живой базе db-platform от API-роли, а сессию добывают входом администратора:
+Интеграционные тесты идут на живой базе db-platform от API-роли, а сессию добывают входом администратора. На дороге `daemon` к сессии прилагается токен, который база выдаёт для указанной аудитории (client id фронтенда):
 
 ```bash
-GO_TEST_PG_DSN=postgres://apibot:…@localhost:5432/db \
+GO_TEST_PG_DSN=postgres://daemon:…@localhost:5432/db \
 GO_TEST_ADMIN_DSN=postgres://admin:…@localhost:5432/db \
+GO_TEST_AUDIENCE=<client id> \
 GO_TEST_DB_PLATFORM_VERSION=$(cat path/to/db-platform/VERSION) \
   go test -tags integration -run Integration ./... -count=1
 ```

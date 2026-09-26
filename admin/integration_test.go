@@ -15,7 +15,7 @@ import (
 )
 
 func live(t *testing.T) *resttest.Live {
-	return resttest.Start(t, "go-admin-test", func(r *pgtx.Runner) platform.Module { return New(Config{Doer: r}) })
+	return resttest.Start(t, "go-admin-test", func(r resttest.Doer) platform.Module { return New(Config{Doer: r}) })
 }
 
 func TestIntegration_UsersLifecycleAndParity(t *testing.T) {
@@ -35,7 +35,7 @@ func TestIntegration_UsersLifecycleAndParity(t *testing.T) {
 		t.Fatalf("list body: %v %s", err, rec.Body)
 	}
 	var total int64
-	_ = json.Unmarshal(l.Direct(t, "SELECT api.count_user(NULL)"), &total)
+	_ = json.Unmarshal(l.Row(t, "count_user", nil), &total)
 	if total != list.Total {
 		t.Fatalf("total %d, api.count_user %d", list.Total, total)
 	}
@@ -63,7 +63,7 @@ func TestIntegration_UsersLifecycleAndParity(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("get: %d %s", rec.Code, rec.Body)
 	}
-	want := l.Direct(t, "SELECT row_to_json(t) FROM api.get_user($1::uuid) t", id)
+	want := l.Row(t, "get_user", pgtx.Args{"id": id})
 	if !resttest.SameJSON(rec.Body.Bytes(), want) {
 		t.Fatalf("parity:\n v2 %s\n v1 %s", rec.Body.Bytes(), want)
 	}
@@ -119,7 +119,7 @@ func TestIntegration_UsersLifecycleAndParity(t *testing.T) {
 	var group struct {
 		ID string `json:"id"`
 	}
-	_ = json.Unmarshal(l.Direct(t, "SELECT row_to_json(t) FROM api.list_group(NULL, NULL, 1) t"), &group)
+	_ = json.Unmarshal(l.Row(t, "list_group", pgtx.Args{"limit": 1}), &group)
 	if group.ID == "" {
 		t.Fatal("no group to test membership with")
 	}
@@ -137,7 +137,7 @@ func TestIntegration_UsersLifecycleAndParity(t *testing.T) {
 		t.Fatalf("groups: %d %s", rec.Code, rec.Body)
 	}
 	var v1 []map[string]any
-	_ = json.Unmarshal(l.Direct(t, "SELECT coalesce(json_agg(row_to_json(t)), '[]') FROM api.member_group($1::uuid) t", id), &v1)
+	_ = json.Unmarshal(l.Rows(t, "member_group", pgtx.Args{"userid": id}), &v1)
 	if len(v1) != len(groups) {
 		t.Fatalf("parity groups: v2 %d, api.member_group %d", len(groups), len(v1))
 	}

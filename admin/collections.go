@@ -57,12 +57,12 @@ var interfaces = collection{
 	addFn: "api.interface_member_add", delFn: "api.interface_member_delete", key: "interface",
 }
 
-// areaTypes is the view api.area_type (v1 /admin/area/type); sessions is
+// areaTypes is api.list_area_type (v1 /admin/area/type); sessions is
 // api.list_session/count_session (v1 /admin/session/*) — read-only: a session
 // code is a credential and is never addressed in a path.
 var (
 	areaTypes = rest.Resource{Prefix: "/api/v2/area-types"}
-	// locales is the view api.locale (v1 /locale of rest.api): the languages of the texts
+	// locales is api.list_locale (v1 /locale of rest.api): the languages of the texts
 	locales  = rest.Resource{Prefix: "/api/v2/locales"}
 	sessions = rest.Resource{Prefix: "/api/v2/sessions", ListFn: "api.list_session", CountFn: "api.count_session"}
 )
@@ -116,8 +116,8 @@ func (m *module) collectionRoutes(mux *http.ServeMux) {
 	}
 	mux.HandleFunc("POST "+areas.Prefix+"/{id}/actions/{action}", m.areaAction)
 	mux.HandleFunc("POST "+areas.Prefix+"/actions/clear", m.areasClear)
-	mux.HandleFunc("GET "+areaTypes.Prefix, rest.RowsHandler(m.cfg.Doer, m.log, "SELECT row_to_json(t) FROM api.area_type t")) // a view, read as the pool's role
-	mux.HandleFunc("GET "+locales.Prefix, rest.RowsHandler(m.cfg.Doer, m.log, "SELECT row_to_json(t) FROM api.locale t ORDER BY t.code"))
+	mux.HandleFunc("GET "+areaTypes.Prefix, rest.CallRowsHandler(m.cfg.Doer, m.log, "list_area_type", pgtx.Args{"limit": 0}))
+	mux.HandleFunc("GET "+locales.Prefix, rest.CallRowsHandler(m.cfg.Doer, m.log, "list_locale", pgtx.Args{"orderby": json.RawMessage(`["code ASC"]`), "limit": 0}))
 	mux.HandleFunc("GET "+sessions.Prefix, sessions.List(m.cfg.Doer, m.log))
 }
 

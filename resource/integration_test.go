@@ -15,7 +15,7 @@ import (
 )
 
 func live(t *testing.T) *resttest.Live {
-	return resttest.Start(t, "go-resource-test", func(r *pgtx.Runner) platform.Module { return New(Config{Doer: r}) })
+	return resttest.Start(t, "go-resource-test", func(r resttest.Doer) platform.Module { return New(Config{Doer: r}) })
 }
 
 func TestIntegration_ResourceLifecycle(t *testing.T) {
@@ -34,7 +34,7 @@ func TestIntegration_ResourceLifecycle(t *testing.T) {
 	}
 	t.Cleanup(func() { l.Call("DELETE", "/api/v2/resources/"+id, "") })
 	rec = l.Call("GET", "/api/v2/resources/"+id, "")
-	if rec.Code != 200 || !resttest.SameJSON(rec.Body.Bytes(), l.Direct(t, "SELECT row_to_json(t) FROM api.get_resource($1::uuid) t", id)) {
+	if rec.Code != 200 || !resttest.SameJSON(rec.Body.Bytes(), l.Row(t, "get_resource", pgtx.Args{"id": id})) {
 		t.Fatalf("parity: %d %s", rec.Code, rec.Body)
 	}
 	etag := rec.Header().Get("ETag")

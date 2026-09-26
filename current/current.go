@@ -71,27 +71,23 @@ type body struct {
 	OperDate  json.RawMessage `json:"oper_date"` // "null" when given as null, nil when absent
 }
 
-// castOf picks the api.set_session_<x> overload by the value's shape.
-// sessionArgs are the arguments of api.set_session_<name>: a uuid or a code.
+// sessionCall is the api.set_session_<name> call for a uuid or a code:
 // locale names them apart (pLocale uuid | pCode text); area has one name for
-// both, so the type is pinned; interface takes a uuid only (a code is refused
-// before the database, see patch).
-func sessionArgs(name, v string) pgtx.Args {
+// both overloads, so a code goes to api.set_session_area_by_code — the one
+// daemon.call can tell apart by name, and the same on the direct road;
+// interface takes a uuid only (a code is refused before the database, see
+// patch).
+func sessionCall(name, v string) (string, pgtx.Args) {
 	isID := rest.IsUUID(v)
-	if name == "locale" {
-		if isID {
-			return pgtx.Args{"locale": v}
-		}
-		return pgtx.Args{"code": v}
+	switch {
+	case name == "locale" && isID:
+		return "set_session_locale", pgtx.Args{"locale": v}
+	case name == "locale":
+		return "set_session_locale", pgtx.Args{"code": v}
+	case name == "area" && !isID:
+		return "set_session_area_by_code", pgtx.Args{"code": v}
 	}
-	if name == "interface" {
-		return pgtx.Args{"interface": v}
-	}
-	t := "text"
-	if isID {
-		t = "uuid"
-	}
-	return pgtx.Args{name: pgtx.Typed{V: v, Type: t}}
+	return "set_session_" + name, pgtx.Args{name: v}
 }
 
 // New returns the package as a platform.Module.
@@ -176,7 +172,8 @@ func (m *module) patch(w http.ResponseWriter, r *http.Request) {
 			if f.v == nil {
 				continue
 			}
-			if _, err := pgtx.Call(ctx, tx, "set_session_"+f.name, sessionArgs(f.name, *f.v)); err != nil {
+			fn, args := sessionCall(f.name, *f.v)
+			if _, err := pgtx.Call(ctx, tx, fn, args); err != nil {
 				return err
 			}
 		}

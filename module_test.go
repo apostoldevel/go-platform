@@ -179,14 +179,38 @@ func TestSessionOf_CarriesTokenSubjectAgentAndClientAddress(t *testing.T) {
 	var seen pgtx.Session
 	h := host(t, platform.Config{}, fake{name: "x", pref: []string{"/api/v2/x"}, seen: &seen})
 	sub := strings.Repeat("a", 40)
-	rec := do(h, "GET", "/api/v2/x", map[string]string{"Authorization": "Bearer " + token(sub), "User-Agent": "ua/1", "X-Forwarded-For": "10.0.0.1, 10.0.0.2"})
+	tok := token(sub)
+	rec := do(h, "GET", "/api/v2/x", map[string]string{"Authorization": "Bearer " + tok, "User-Agent": "ua/1", "X-Forwarded-For": "10.0.0.1, 10.0.0.2"})
 	if rec.Code != 200 {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
 	}
 	// no trusted list: the peer (the gateway) is the only trusted proxy, the
-	// client is what it appended — the last element, never the first
-	if seen.Code != sub || seen.Agent != "ua/1" || seen.Host != "10.0.0.2" {
+	// client is what it appended — the last element, never the first; the
+	// token travels on for daemon.begin to verify again
+	if seen.Code != sub || seen.Token != tok || seen.Agent != "ua/1" || seen.Host != "10.0.0.2" {
 		t.Fatalf("%+v", seen)
+	}
+}
+
+func TestOpenPrefixes_ByTheDatabaseRoutes(t *testing.T) {
+	routes := []pgtx.Route{{Path: "/api/v2/users", Method: "GET"}, {Path: "/api/v2/me", Method: "GET"}, {Path: "/api/v2/me/event-log", Method: "GET"}, {Path: "/api/v2/registry/keys", Method: "GET"}}
+	prefixes := []string{"/api/v2/users", "/api/v2/me", "/api/v2/me/event-log/x", "/api/v2/registry", "/api/v2/vessels", "/api/v2/user", "/api/v2/health"}
+	open, closed := platform.OpenPrefixes(prefixes, routes, "/api/v2/health")
+	// on it, above it (me → me/event-log/x), under it (registry → registry/keys);
+	// /api/v2/user is not /api/v2/users — segments, not strings
+	if fmt.Sprint(open) != "[/api/v2/users /api/v2/me /api/v2/me/event-log/x /api/v2/registry /api/v2/health]" {
+		t.Fatalf("open %v", open)
+	}
+	if fmt.Sprint(closed) != "[/api/v2/vessels /api/v2/user]" {
+		t.Fatalf("closed %v", closed)
+	}
+	// no guards in the database (the direct road): everything is announced
+	if open, closed := platform.OpenPrefixes(prefixes, nil); len(open) != len(prefixes) || closed != nil {
+		t.Fatalf("direct road: %v %v", open, closed)
+	}
+	// the daemon road with no route at all closes everything but always
+	if open, closed := platform.OpenPrefixes(prefixes, []pgtx.Route{}, "/api/v2/health"); fmt.Sprint(open) != "[/api/v2/health]" || len(closed) != 6 {
+		t.Fatalf("no routes: %v %v", open, closed)
 	}
 }
 
