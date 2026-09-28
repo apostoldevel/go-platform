@@ -133,18 +133,17 @@ COMMIT
 
 * **Рукопожатие** — `GET {GATEWAY_URL}/{module}/{instance}` с `Authorization: Bearer <токен client_credentials>`; `Config.Token` возвращает токен и вызывается при каждом (пере)подключении, так что может обновлять его.
 * **`/register`** — module, instance, version, build, `address` (IPv4-литерал `host:port` плоскости данных — пустой `Config.Address` берёт локальный адрес управляющего сокета плюс `ListenPort`), префиксы и ёмкость. В ответе — `heartbeat_interval`.
-* **`/heartbeat`** каждый интервал с числом запросов в полёте (`Config.InFlight`); **`/status`** при `ready` / `draining` / `overloaded` (`SetOverloaded`); **`/unregister`** перед закрытием.
+* **`/heartbeat`** каждый интервал с числом запросов в полёте (`Client.Load` или `Config.InFlight`); **`/status`** при `ready` / `draining` / `overloaded` — `Load` объявляет `overloaded`, когда число доходит до `Capacity`, и `ready` на трёх четвертях от него (иначе `SetOverloaded` вручную), и никогда после `draining`; **`/unregister`** перед закрытием.
 * **Команды** — на `/ping` отвечает числом запросов в полёте; `/drain` запускает дренаж; `/reload` вызывает `Config.OnReload`, и изменённые адрес, префиксы или ёмкость заставляют клиента перерегистрироваться.
 * **Дренаж** (`Client.Drain`, ответ вызывающего кода на `SIGTERM`) — `/status draining` → ожидание запросов в полёте (`DrainDeadline`, по умолчанию 30 с) → `/unregister` → закрытие `1000`. Выйти раньше — и запросы в полёте станут `502` для клиента.
-* **Переподключение** — после потери сокета или неудачного соединения с `DefaultReconnect` (1 → 30 с, ±20 %); после отвергнутой регистрации или отвергнутого рукопожатия — через 30 с; закрытие `1001` (заменён более новой регистрацией с тем же именем) завершает `Run` ошибкой `ErrReplaced` — модуль не должен переподключаться; кадр больше 64 KiB закрывает сокет с `1009`.
+* **Переподключение** — после потери сокета или неудачного соединения с `DefaultReconnect` (1 → 30 с, ±20 %); после отвергнутой регистрации или отвергнутого рукопожатия — через 30 с; закрытие `1001` (заменён более новой регистрацией с тем же именем или процесс шлюза уходит) — переподключение, с замедлением 1 → 30 с, пока каждый `1001` приходит в пределах 30 с после своей регистрации (два экземпляра под одним именем); кадр больше 64 KiB закрывает сокет с `1009`.
 
 ```go
 gw, err := gatewayclient.New(gatewayclient.Config{
     URL: cfg.GatewayURL, Module: "example-api", Instance: cfg.Instance, Version: version, Build: build,
     Address: cfg.AdvertiseAddr, Prefixes: platform.Prefixes(mods...), Capacity: cfg.Capacity,
-    Token:    token,                                   // client_credentials из /oauth2/token
-    InFlight: func() int { return int(inFlight.Load()) },
-    Logger:   log,
+    Token:  token,                                     // client_credentials из /oauth2/token
+    Logger: log,
 })
 go gw.Run(ctx)                                         // переподключается, пока ctx жив
 …
@@ -213,7 +212,7 @@ mods := []platform.Module{
     …
     client.New(client.Config{Doer: runner, Logger: log}),   // собственный пакет проекта
 }
-handler, err := platform.New(platform.Config{Keys: keys, InFlight: &inFlight}, mods...)
+handler, err := platform.New(platform.Config{Keys: keys, InFlight: gw.Load()}, mods...)
 ```
 
 **База данных.** Версия db-platform, названная в `platform.DBPlatform`, с модулем `gateway` (`api.authorize_local`, `api.log_request`) для пути «сессия на транзакцию»; без него библиотека откатывается на `api.authorize` и ничего не журналирует.
@@ -222,6 +221,7 @@ handler, err := platform.New(platform.Config{Keys: keys, InFlight: &inFlight}, m
 
 ```bash
 go run ./cmd/gatewaystub -addr 127.0.0.1:4978 -secret stub-secret -audience gateway-stub
+curl -X POST 'http://127.0.0.1:4978/gateway/kick?code=1001'    # закрыть сокет модуля и увидеть переподключение
 ```
 
 Тесты

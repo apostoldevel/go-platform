@@ -28,6 +28,8 @@ type session struct {
 	closeErr error // set by the reader when the socket ends
 	draining bool
 	done     chan struct{} // closed when the reader stops
+
+	said string // the state the gateway last heard from us; under Client.statusMu
 }
 
 func (c *Client) runSession(ctx context.Context) (registered bool, err error) {
@@ -93,7 +95,8 @@ func (c *Client) runSession(ctx context.Context) (registered bool, err error) {
 		return false, &refusal{code: res.Code, msg: res.Message}
 	}
 	var ack struct {
-		HeartbeatInterval int `json:"heartbeat_interval"`
+		HeartbeatInterval int    `json:"heartbeat_interval"`
+		GatewayNode       string `json:"gateway_node"` // "<node>:<pid>" of the gateway process holding the socket; logs only
 	}
 	if err := json.Unmarshal(res.Payload, &ack); err != nil || ack.HeartbeatInterval < 1 {
 		s.close(websocket.StatusProtocolError, "bad /register result")
@@ -109,14 +112,15 @@ func (c *Client) runSession(ctx context.Context) (registered bool, err error) {
 	if c.reg.Address == "" {
 		c.reg.Address = reg.Address
 	}
-	overloaded := c.overloaded
 	c.mu.Unlock()
 	defer func() { c.mu.Lock(); c.active = nil; c.mu.Unlock() }()
+	s.said = "ready" // a registration enters ready (K8); no /status has used s yet
 	c.setState(Ready)
 	c.emit(EventRegistered)
-	c.log.Info("registered", "address", reg.Address, "prefixes", reg.Prefixes, "heartbeat_interval", ack.HeartbeatInterval)
-	if overloaded {
-		s.status("overloaded", "")
+	c.log.Info("registered", "address", reg.Address, "prefixes", reg.Prefixes, "heartbeat_interval", ack.HeartbeatInterval, "gateway_node", ack.GatewayNode)
+	c.syncStatus(s)
+	if l := c.load.Load(); l != nil {
+		l.poke() // the capacity may have changed with this registration
 	}
 	return true, s.loop()
 }
@@ -134,7 +138,7 @@ func (s *session) loop() error {
 		case req := <-c.drainCh:
 			return s.drain(req)
 		case <-ticker.C:
-			res, err := s.call("/heartbeat", map[string]any{"in_flight": c.cfg.InFlight()}, s.interval)
+			res, err := s.call("/heartbeat", map[string]any{"in_flight": c.inFlight()}, s.interval)
 			switch {
 			case err != nil && errors.Is(err, errTimeout):
 				unanswered++
@@ -161,19 +165,21 @@ func (s *session) loop() error {
 // drain runs the shutdown: /status draining → wait → /unregister → close 1000.
 func (s *session) drain(req drainReq) error {
 	c := s.c
+	c.statusMu.Lock() // no ready/overloaded in flight may land after draining
 	c.setState(Draining)
 	s.mu.Lock()
 	s.draining = true
 	s.mu.Unlock()
 	s.status("draining", req.reason)
+	c.statusMu.Unlock()
 	deadline := time.After(req.deadline)
 	poll := time.NewTicker(50 * time.Millisecond)
 	defer poll.Stop()
 wait:
-	for c.cfg.InFlight() > 0 {
+	for c.inFlight() > 0 {
 		select {
 		case <-deadline:
-			c.log.Warn("drain deadline reached with requests in flight", "in_flight", c.cfg.InFlight())
+			c.log.Warn("drain deadline reached with requests in flight", "in_flight", c.inFlight())
 			break wait
 		case <-s.done:
 			break wait
@@ -199,7 +205,8 @@ func (s *session) status(state, reason string) {
 var errTimeout = errors.New("no answer")
 
 // closeSilentGateway is the module-side close code for "the gateway stopped
-// answering" — 4001, so that 1001 keeps its protocol meaning (replaced).
+// answering" — 4001, so that 1001 keeps its protocol meaning: the gateway's
+// "replaced" or "going away", after which the module reconnects.
 const closeSilentGateway = websocket.StatusCode(4001)
 
 // call sends a CALL and waits for its CALLRESULT/CALLERROR.
@@ -281,7 +288,7 @@ func (s *session) handle(f frame.Frame) {
 	c := s.c
 	switch f.Action {
 	case "/ping":
-		_ = s.send(f.Result(map[string]any{"in_flight": c.cfg.InFlight()}))
+		_ = s.send(f.Result(map[string]any{"in_flight": c.inFlight()}))
 	case "/drain":
 		var p struct {
 			Reason   string `json:"reason"`
@@ -319,6 +326,7 @@ func (s *session) handle(f frame.Frame) {
 				cur.Prefixes = next.Prefixes
 			}
 			c.reg = cur
+			c.capacity.Store(int32(cur.Capacity))
 		}
 		c.mu.Unlock()
 		if changed {
@@ -345,8 +353,8 @@ func (s *session) endError(err error) error {
 		return errDrained
 	}
 	switch websocket.CloseStatus(closeErr) {
-	case websocket.StatusGoingAway: // 1001 — replaced
-		return ErrReplaced
+	case websocket.StatusGoingAway: // 1001 — replaced, or the gateway going away
+		return errGoingAway
 	case websocket.StatusPolicyViolation: // 1008 — refusal without CALLERROR
 		// A gateway that cannot refuse before 101 closes 1008 right after
 		// the upgrade with the reason.

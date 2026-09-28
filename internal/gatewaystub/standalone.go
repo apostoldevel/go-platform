@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -45,6 +46,21 @@ func Standalone(opts Options) (*Stub, http.Handler) {
 		defer s.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"registrations": s.registrations, "heartbeats": len(s.heartbeats), "statuses": s.statuses, "unregisters": s.unregisters, "close_codes": s.closeCodes})
+	})
+	// closes the module's socket with ?code= (default 1001, "going away") —
+	// to watch a real binary reconnect
+	mux.HandleFunc("POST /gateway/kick", func(w http.ResponseWriter, r *http.Request) {
+		code, err := strconv.Atoi(r.URL.Query().Get("code"))
+		if err != nil {
+			code = 1001
+		}
+		// codes a peer may send in a close frame (RFC 6455 §7.4)
+		if code < 1000 || code > 4999 || code >= 1004 && code <= 1006 || code == 1015 {
+			http.Error(w, "code cannot be sent in a close frame", http.StatusBadRequest)
+			return
+		}
+		s.Kick(code, "kicked")
+		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("/gateway/", s.handle)
 	return s, mux

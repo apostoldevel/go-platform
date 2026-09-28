@@ -133,18 +133,17 @@ Control plane
 
 * **Handshake** — `GET {GATEWAY_URL}/{module}/{instance}` with `Authorization: Bearer <client_credentials token>`; `Config.Token` returns the token and is called on every (re)connection, so it may refresh.
 * **`/register`** — module, instance, version, build, `address` (an IPv4 literal `host:port` of the data plane — empty `Config.Address` takes the local address of the control socket plus `ListenPort`), the prefixes and the capacity. The reply carries `heartbeat_interval`.
-* **`/heartbeat`** every interval with the in-flight count (`Config.InFlight`); **`/status`** on `ready` / `draining` / `overloaded` (`SetOverloaded`); **`/unregister`** before closing.
+* **`/heartbeat`** every interval with the in-flight count (`Client.Load`, or `Config.InFlight`); **`/status`** on `ready` / `draining` / `overloaded` — `Load` announces `overloaded` when the count reaches `Capacity` and `ready` at three quarters of it (`SetOverloaded` by hand otherwise), never after `draining`; **`/unregister`** before closing.
 * **Commands** — `/ping` is answered with the in-flight count; `/drain` starts the drain; `/reload` calls `Config.OnReload`, and a changed address, prefixes or capacity make the client re-register.
 * **Drain** (`Client.Drain`, the caller's answer to `SIGTERM`) — `/status draining` → wait for in-flight requests (`DrainDeadline`, default 30 s) → `/unregister` → close `1000`. Exit before that and the in-flight requests are `502` for the client.
-* **Reconnect** — after a lost socket or a failed dial with `DefaultReconnect` (1 → 30 s, ±20 %); after a refused registration or a rejected handshake after 30 s; close `1001` (replaced by a newer registration with the same name) ends `Run` with `ErrReplaced` — the module must not reconnect; a frame above 64 KiB closes the socket with `1009`.
+* **Reconnect** — after a lost socket or a failed dial with `DefaultReconnect` (1 → 30 s, ±20 %); after a refused registration or a rejected handshake after 30 s; close `1001` (replaced by a newer registration with the same name, or the gateway process going away) — reconnect, slowing down 1 → 30 s while each `1001` follows its registration within 30 s (two instances under one name); a frame above 64 KiB closes the socket with `1009`.
 
 ```go
 gw, err := gatewayclient.New(gatewayclient.Config{
     URL: cfg.GatewayURL, Module: "example-api", Instance: cfg.Instance, Version: version, Build: build,
     Address: cfg.AdvertiseAddr, Prefixes: platform.Prefixes(mods...), Capacity: cfg.Capacity,
-    Token:    token,                                   // client_credentials from /oauth2/token
-    InFlight: func() int { return int(inFlight.Load()) },
-    Logger:   log,
+    Token:  token,                                     // client_credentials from /oauth2/token
+    Logger: log,
 })
 go gw.Run(ctx)                                         // reconnects until ctx is done
 …
@@ -213,7 +212,7 @@ mods := []platform.Module{
     …
     client.New(client.Config{Doer: runner, Logger: log}),   // the project's own
 }
-handler, err := platform.New(platform.Config{Keys: keys, InFlight: &inFlight}, mods...)
+handler, err := platform.New(platform.Config{Keys: keys, InFlight: gw.Load()}, mods...)
 ```
 
 **Database.** The db-platform version named in `platform.DBPlatform`, with the `gateway` module (`api.authorize_local`, `api.log_request`) for the session-per-transaction path; without it the library falls back to `api.authorize` and logs nothing.
@@ -222,6 +221,7 @@ handler, err := platform.New(platform.Config{Keys: keys, InFlight: &inFlight}, m
 
 ```bash
 go run ./cmd/gatewaystub -addr 127.0.0.1:4978 -secret stub-secret -audience gateway-stub
+curl -X POST 'http://127.0.0.1:4978/gateway/kick?code=1001'    # close the module's socket, watch it reconnect
 ```
 
 Tests

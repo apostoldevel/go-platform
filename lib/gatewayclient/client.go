@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"regexp"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -36,13 +37,20 @@ const (
 	EventRefused           Event = "refused"            // CALLERROR on /register (400/403/409/422); slow retry
 	EventRegistered        Event = "registered"         // ready
 	EventDisconnected      Event = "disconnected"       // socket lost or silent gateway; backoff
-	EventReplaced          Event = "replaced"           // close 1001; Run returns ErrReplaced
+	EventReplaced          Event = "replaced"           // close 1001 (replaced or gateway going away); backoff
 	EventDrained           Event = "drained"            // /unregister done, socket closed 1000; Run returns nil
 )
 
-// ErrReplaced is returned by Run after close 1001: another instance with the
-// same name registered — the module must not reconnect.
+// ErrReplaced was returned by Run after close 1001.
+//
+// Deprecated: Run reconnects after 1001 (contract K2) and never returns it;
+// kept so that code written against v0.1.0 still compiles.
 var ErrReplaced = errors.New("gatewayclient: replaced by a newer registration")
+
+// errGoingAway is a close 1001: a newer registration of this instance, or a
+// gateway process going away (a worker stopping, a pod rolling). Both end
+// the same way — reconnect.
+var errGoingAway = errors.New("closed 1001 by the gateway")
 
 var errDrained = errors.New("drained")
 
@@ -71,7 +79,8 @@ type Config struct {
 	// Token returns the service token the gateway accepts; called on every
 	// (re)connection, so it may refresh.
 	Token func(ctx context.Context) (string, error)
-	// InFlight reports requests currently being served (heartbeat, /ping, drain).
+	// InFlight reports requests currently being served (heartbeat, /ping,
+	// drain). Nil: the client's Load, if one is taken, else zero.
 	InFlight func() int
 	// OnReload runs on /reload; a non-nil result with changed prefixes,
 	// address or capacity makes the client re-register.
@@ -100,9 +109,15 @@ type Client struct {
 	state      State
 	reg        Registration
 	overloaded bool
-	active     *session // the live connection, nil between sessions
-	drainCh    chan drainReq
-	drained    chan struct{}
+	active     *session             // the live connection, nil between sessions
+	load       atomic.Pointer[Load] // counts in flight when Config.InFlight is nil
+	loadOnce   sync.Once
+	capacity   atomic.Int32 // = reg.Capacity, read on the request path by Load
+	// statusMu serialises every /status, held across the call: what the
+	// gateway last heard is then session.said, and nothing follows draining
+	statusMu sync.Mutex
+	drainCh  chan drainReq
+	drained  chan struct{}
 }
 
 type drainReq struct {
@@ -140,9 +155,6 @@ func New(cfg Config) (*Client, error) {
 			return nil, fmt.Errorf("gatewayclient: bad prefix %q", p)
 		}
 	}
-	if cfg.InFlight == nil {
-		cfg.InFlight = func() int { return 0 }
-	}
 	if cfg.Reconnect == nil {
 		cfg.Reconnect = DefaultReconnect
 	}
@@ -155,14 +167,16 @@ func New(cfg Config) (*Client, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
-	return &Client{
+	c := &Client{
 		cfg:     cfg,
 		log:     cfg.Logger.With("module", cfg.Module, "instance", cfg.Instance),
 		state:   Offline,
 		reg:     Registration{Address: cfg.Address, Prefixes: cfg.Prefixes, Capacity: cfg.Capacity},
 		drainCh: make(chan drainReq, 1),
 		drained: make(chan struct{}),
-	}, nil
+	}
+	c.capacity.Store(int32(cfg.Capacity))
+	return c, nil
 }
 
 // DefaultReconnect is the protocol's schedule: 1, 2, 4, 8, 16, 30, 30… s, ±20 %.
@@ -173,6 +187,17 @@ func DefaultReconnect(attempt int) time.Duration {
 	}
 	jitter := 1 + (rand.Float64()*0.4 - 0.2)
 	return time.Duration(float64(base) * jitter)
+}
+
+// inFlight is what heartbeat, /ping and drain report.
+func (c *Client) inFlight() int {
+	if c.cfg.InFlight != nil {
+		return c.cfg.InFlight()
+	}
+	if l := c.load.Load(); l != nil {
+		return l.Value()
+	}
+	return 0
 }
 
 // State returns the current instance state.
@@ -186,8 +211,8 @@ func (c *Client) emit(e Event) {
 	}
 }
 
-// Run keeps the control connection alive until ctx ends, Drain completes
-// (returns nil) or the gateway replaces this instance (ErrReplaced).
+// Run keeps the control connection alive until ctx ends or Drain completes
+// (returns nil).
 func (c *Client) Run(ctx context.Context) error {
 	c.mu.Lock()
 	select {
@@ -197,7 +222,9 @@ func (c *Client) Run(ctx context.Context) error {
 	}
 	c.mu.Unlock()
 	attempt := 0
+	replaced := 0 // 1001s in a row, each soon after its registration
 	for {
+		began := time.Now()
 		registered, err := c.runSession(ctx)
 		if registered {
 			attempt = 0
@@ -210,10 +237,21 @@ func (c *Client) Run(ctx context.Context) error {
 			c.setState(Offline)
 			c.emit(EventDrained)
 			return nil
-		case errors.Is(err, ErrReplaced):
+		case errors.Is(err, errGoingAway):
+			// two instances under one name replace each other this way in a
+			// loop; the gateway's log shows it as frequent "replaced" — a
+			// configuration error of the module (K2), not a reason to stop,
+			// but the loop slows down as 1→30 s instead of turning every second
+			if time.Since(began) < 30*time.Second {
+				replaced++
+			} else {
+				replaced = 0
+			}
 			c.setState(Offline)
+			c.log.Warn("gateway closed the socket 1001; reconnecting", "in_a_row", replaced)
 			c.emit(EventReplaced)
-			return ErrReplaced
+			wait = c.cfg.Reconnect(max(attempt, replaced-1))
+			attempt++
 		case errors.As(err, new(*refusal)):
 			c.setState(Offline)
 			var r *refusal
@@ -268,20 +306,47 @@ func (c *Client) drain(ctx context.Context, reason string, deadline time.Duratio
 	}
 }
 
-// SetOverloaded announces overloaded (true) or ready (false).
+// SetOverloaded announces overloaded (true) or ready (false); between
+// connections it is kept and told at the next registration. Nothing is sent
+// while draining: draining → ready is not a transition the gateway accepts.
 func (c *Client) SetOverloaded(on bool) {
 	c.mu.Lock()
-	changed := c.overloaded != on
 	c.overloaded = on
 	s := c.active
 	c.mu.Unlock()
-	if changed && s != nil {
-		st := "ready"
-		if on {
-			st = "overloaded"
-		}
-		s.status(st, "")
+	if s != nil {
+		c.syncStatus(s)
 	}
+}
+
+// syncStatus tells the gateway, on s, the overloaded flag as it is when the
+// turn comes — not as it was when asked, so two callers racing each other
+// (a Load watcher and a fresh registration) end on the current value.
+func (c *Client) syncStatus(s *session) {
+	c.statusMu.Lock()
+	defer c.statusMu.Unlock()
+	c.mu.Lock()
+	want, current := "ready", c.active == s
+	if c.overloaded {
+		want = "overloaded"
+	}
+	c.mu.Unlock()
+	s.mu.Lock()
+	draining := s.draining
+	s.mu.Unlock()
+	if !current || draining || s.said == want {
+		return
+	}
+	s.status(want, "")
+	s.said = want
+	c.mu.Lock()
+	if c.active == s { // the socket may have ended during the call
+		c.state = Ready
+		if want == "overloaded" {
+			c.state = Overloaded
+		}
+	}
+	c.mu.Unlock()
 }
 
 type refusal struct {
