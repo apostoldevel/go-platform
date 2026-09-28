@@ -27,11 +27,13 @@ var pending = map[string]struct {
 	"lib/rest/rest.go:RowHandler":  {1, "deprecated: kept for the projects that have not moved to pgtx.Call"},
 
 	"internal/resttest/resttest.go:Start": {2, "mints and signs out a test session on the administrator's DSN — the test's own connection, never the service's; stays"},
+	"lib/pgtx/pgtxtest/pgtxtest.go:Login": {4, "mints a test session with a database-issued token on the administrator's DSN (a connection the caller passes) — the test's own, never the service's; stays"},
 }
 
 // Under the daemon role there is no text of SQL to send over schema api —
 // every package reaches the database through pgtx.Call. A new raw query
-// anywhere outside lib/pgtx is red here, not a 500 on the stand.
+// anywhere outside the files of lib/pgtx (its subpackages included) is red
+// here, not a 500 on the stand.
 func TestNoTextOfSQLOutsidePgtx(t *testing.T) {
 	// methods that take (ctx, sql, …) on pgx, pgconn or database/sql
 	raw := map[string]bool{"Query": true, "QueryRow": true, "Exec": true, "SendBatch": true, "CopyFrom": true,
@@ -45,12 +47,17 @@ func TestNoTextOfSQLOutsidePgtx(t *testing.T) {
 			return err
 		}
 		if d.IsDir() {
-			if path == "lib/pgtx" || strings.HasPrefix(path, ".") && path != "." {
+			if strings.HasPrefix(path, ".") && path != "." {
 				return filepath.SkipDir
 			}
 			return nil
 		}
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		// lib/pgtx itself is where the text lives; its subpackages are not
+		// exempt by being under it (pgtxtest is a package of its own)
+		if filepath.ToSlash(filepath.Dir(path)) == "lib/pgtx" {
 			return nil
 		}
 		f, err := parser.ParseFile(fset, path, nil, 0)

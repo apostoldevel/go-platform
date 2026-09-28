@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"sync"
 	"testing"
@@ -22,7 +23,7 @@ import (
 // GO_TEST_AUDIENCE the client id the token is issued for (a web front-end's).
 // Skipped under a role that does not take the road.
 
-func daemonRoad(t *testing.T) (*pgtx.Runner, func(t *testing.T) pgtx.Session) {
+func daemonRoad(t *testing.T) (*pgtx.Runner, func(t *testing.T, as ...string) pgtx.Session) {
 	t.Helper()
 	dsn, admin, aud := os.Getenv("GO_TEST_PG_DSN"), os.Getenv("GO_TEST_ADMIN_DSN"), os.Getenv("GO_TEST_AUDIENCE")
 	if dsn == "" || admin == "" {
@@ -47,14 +48,18 @@ func daemonRoad(t *testing.T) (*pgtx.Runner, func(t *testing.T) pgtx.Session) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mint := func(t *testing.T) pgtx.Session {
+	mint := func(t *testing.T, as ...string) pgtx.Session {
 		t.Helper()
+		user, password := cfg.User, cfg.Password
+		if len(as) == 2 {
+			user, password = as[0], as[1]
+		}
 		conn, err := pgx.Connect(context.Background(), admin)
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer conn.Close(context.Background())
-		session, token, err := pgtxtest.Login(context.Background(), conn, aud, cfg.User, cfg.Password, "go-platform-test")
+		session, token, err := pgtxtest.Login(context.Background(), conn, aud, user, password, "go-platform-test")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -203,14 +208,31 @@ func TestIntegrationDaemon_GUCsSetBetweenCallsAreOverwritten(t *testing.T) {
 	}
 }
 
-// Two sessions under one pool, concurrently: every request is journalled
-// under its own session — the line AddApiLog writes in daemon.begin carries
-// the session of the context begin opened, not a neighbour's.
+// Two sessions of two different users under one pool, concurrently: inside
+// the handler every call runs as its own session's user (api.current_user
+// read through daemon.call — a context leaked from the neighbour would show
+// the other user), and every request is journalled under its own session
+// (the line AddApiLog writes in daemon.begin).
 func TestIntegrationDaemon_TwoSessionsDoNotLeakIntoEachOther(t *testing.T) {
 	r, mint := daemonRoad(t)
-	a, b := mint(t), mint(t)
+	login, password := secondUser(t)
+	a, b := mint(t), mint(t, login, password)
+	users := map[string]string{}
+	for _, s := range []pgtx.Session{a, b} {
+		if err := r.Do(context.Background(), s, meReq(), func(ctx context.Context, tx pgx.Tx) error {
+			u, err := userOf(ctx, tx)
+			users[s.Code] = u
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if users[a.Code] == "" || users[a.Code] == users[b.Code] {
+		t.Fatalf("the two sessions must be two users: %v", users)
+	}
 	type done struct {
 		code string
+		user string
 		log  int64
 		err  error
 	}
@@ -222,12 +244,14 @@ func TestIntegrationDaemon_TwoSessionsDoNotLeakIntoEachOther(t *testing.T) {
 			go func(s pgtx.Session) {
 				defer wg.Done()
 				req := meReq()
+				var user string
 				err := r.Do(context.Background(), s, req, func(ctx context.Context, tx pgx.Tx) error {
 					time.Sleep(5 * time.Millisecond)
-					_, err := pgtx.CallRow(ctx, tx, "current_user", nil)
+					var err error
+					user, err = userOf(ctx, tx)
 					return err
 				})
-				out <- done{s.Code, req.LogID, err}
+				out <- done{s.Code, user, req.LogID, err}
 			}(s)
 		}
 	}
@@ -237,6 +261,9 @@ func TestIntegrationDaemon_TwoSessionsDoNotLeakIntoEachOther(t *testing.T) {
 	for d := range out {
 		if d.err != nil || d.log == 0 {
 			t.Fatalf("request: %v (log %d)", d.err, d.log)
+		}
+		if d.user != users[d.code] {
+			t.Fatalf("a request of %s ran as %s — the neighbour's context", users[d.code], d.user)
 		}
 		all = append(all, d)
 	}
@@ -304,7 +331,7 @@ func TestIntegrationDaemon_Routes(t *testing.T) {
 }
 
 // journal reads the api_log line under a fresh administrator request.
-func journal(t *testing.T, r *pgtx.Runner, mint func(t *testing.T) pgtx.Session, id int64) (status int, code string) {
+func journal(t *testing.T, r *pgtx.Runner, mint func(t *testing.T, as ...string) pgtx.Session, id int64) (status int, code string) {
 	t.Helper()
 	var row json.RawMessage
 	if err := r.Do(context.Background(), mint(t), &pgtx.Request{Method: "GET", Path: "/api/v2/api-log"}, func(ctx context.Context, tx pgx.Tx) (err error) {
@@ -325,4 +352,61 @@ func journal(t *testing.T, r *pgtx.Runner, mint func(t *testing.T) pgtx.Session,
 		t.Fatalf("api_log %d: %s", id, row)
 	}
 	return l.JSON.Request.Status, l.JSON.Request.Error
+}
+
+// userOf is the id of the user the handler's calls run as.
+func userOf(ctx context.Context, tx pgx.Tx) (string, error) {
+	row, err := pgtx.CallRow(ctx, tx, "current_user", nil)
+	if err != nil {
+		return "", err
+	}
+	var u struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(row, &u); err != nil {
+		return "", err
+	}
+	return u.ID, nil
+}
+
+// secondUser makes a user of its own on the administrator's DSN for the
+// test and deletes it afterwards: a second identity, so that a leak between
+// sessions is a different user, not the same one twice.
+func secondUser(t *testing.T) (login, password string) {
+	t.Helper()
+	admin := os.Getenv("GO_TEST_ADMIN_DSN")
+	cfg, err := pgx.ParseConfig(admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	login, password = fmt.Sprintf("go-platform-second-%d", time.Now().UnixNano()), "second-secret"
+	var id string
+	asAdmin(t, admin, cfg, func(ctx context.Context, conn *pgx.Conn) error {
+		return conn.QueryRow(ctx, "SELECT api.add_user($1, $2, $3, NULL, NULL, NULL, false)", login, password, "Go platform second user").Scan(&id)
+	})
+	t.Cleanup(func() {
+		asAdmin(t, admin, cfg, func(ctx context.Context, conn *pgx.Conn) error {
+			_, err := conn.Exec(ctx, "SELECT api.delete_user($1)", id)
+			return err
+		})
+	})
+	return login, password
+}
+
+// asAdmin runs fn on the administrator's DSN signed in as the administrator.
+func asAdmin(t *testing.T, admin string, cfg *pgx.ConnConfig, fn func(ctx context.Context, conn *pgx.Conn) error) {
+	t.Helper()
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	if _, err := conn.Exec(ctx, "SELECT SignIn(CreateSystemOAuth2(), $1, $2)", cfg.User, cfg.Password); err != nil {
+		t.Fatalf("sign in: %v", err)
+	}
+	defer conn.Exec(ctx, "SELECT SignOut()") //nolint:errcheck
+	if err := fn(ctx, conn); err != nil {
+		t.Fatal(err)
+	}
 }

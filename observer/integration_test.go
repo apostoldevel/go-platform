@@ -23,10 +23,16 @@ func TestIntegration_Publishers(t *testing.T) {
 	l := live(t)
 	t.Run("list", func(t *testing.T) {
 		rec := l.Call("GET", "/api/v2/observer/publishers", "")
-		// skipped only for that one reason: the route's refusal is ERR-403-012 and
-		// the reference, called the same way, is refused too
-		if _, err := l.Try("list_publisher", pgtx.Args{"limit": 0}); err != nil && rec.Code == 403 && strings.Contains(rec.Body.String(), `"code":"ERR-403-012"`) {
-			t.Skipf("api.list_publisher is not in the allow list of daemon.call (ERR-403-012, %v) — GET /api/v2/observer/publishers answers 403 until the database opens it", err)
+		if l.Runner.Features.Daemon {
+			// a boundary, not a pass and not a skip: db-platform 1.2.31 keeps
+			// api.list_publisher out of daemon.call's allow list, so the route
+			// answers ERR-403-012. This goes red when the function opens —
+			// then the parity below takes over and this branch goes; a skip
+			// here would hide the day it closes again.
+			if rec.Code != 403 || !strings.Contains(rec.Body.String(), `"code":"ERR-403-012"`) {
+				t.Fatalf("publishers on the daemon road: %d %s — the boundary moved, rewrite this test", rec.Code, rec.Body)
+			}
+			return
 		}
 		want := l.Rows(t, "list_publisher", pgtx.Args{"orderby": json.RawMessage(`["code ASC"]`), "limit": 0})
 		if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"code":"notify"`) || !resttest.SameJSON(rec.Body.Bytes(), want) {
