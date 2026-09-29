@@ -112,7 +112,7 @@ COMMIT
 | | |
 |---|---|
 | Ресурсы | существительные во множественном числе, по одному на семейство `api.*`: `/api/v2/users`, `/api/v2/users/{id}`, `/api/v2/users/{id}/groups` |
-| Список | `GET /api/v2/<xs>?filter[state]=enabled&filter[created][gte]=…&filter[state][in]=a,b&sort=-created,name&fields=id,name&page[limit]=50&page[offset]=100` → `{items, total, limit, offset}`; `filter` и `sort` становятся jsonb `search`/`orderby` для `api.sql()` — язык операторов остаётся в базе, Go только переименовывает; `fields` применяется к строкам в Go |
+| Список | `GET /api/v2/<xs>?filter[state]=enabled&filter[created][gte]=…&filter[state][in]=a,b&sort=-created,name&fields=id,name&page[limit]=50&page[offset]=100` → `{items, total, limit, offset}`; `filter` и `sort` становятся jsonb `search`/`orderby` для `api.sql()` — язык операторов остаётся в базе, Go только переименовывает; `fields` применяется к строкам в Go; неизвестный списку параметр, имя которого до первой `[` только из a-z (такие JSON:API резервирует), — `limit`, `filters[state]`, `fields[client]` — отказ (`400`, имя в `detail`), любое другое имя (`_`, `utm_source`) пропускается |
 | Строка | `GET …/{id}` → строка со слабым `ETag`; `If-None-Match` → `304`; строка `null` — `404` |
 | Создание | `POST /api/v2/<xs>` → `201`, `Location`, `ETag`; `Idempotency-Key` повторяет ответ на то же тело |
 | Изменение | `PATCH …/{id}` с `If-Match` (`428` без него, `412` при устаревшем) |

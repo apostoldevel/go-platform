@@ -3,6 +3,8 @@ package query
 import (
 	"encoding/json"
 	"net/url"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -72,10 +74,48 @@ func TestRejects(t *testing.T) {
 }
 
 func TestUnknownParametersIgnored(t *testing.T) {
-	// a cache-buster or tracking parameter must not break the request
-	if _, err := Parse(url.Values{"_": {"1"}, "utm_source": {"x"}}); err != nil {
+	// a name with a character outside a-z is the client's own (JSON:API
+	// "implementation-specific"): a cache-buster or tracking parameter must
+	// not break the request
+	for _, raw := range []string{"_=1", "utm_source=x", "cacheBust=1", "x-trace=1", "_=1&filter[state]=enabled"} {
+		if _, err := Parse(mustQuery(t, raw)); err != nil {
+			t.Errorf("%q: %v", raw, err)
+		}
+	}
+}
+
+func TestUnknownListParametersRefused(t *testing.T) {
+	// a name of a-z only is reserved for the list language; an unknown one
+	// is a typo of it, and ignoring it answers "everything" to a selection
+	for raw, name := range map[string]string{
+		"limit=50":              "limit",
+		"offset=100":            "offset",
+		"search=ivan":           "search",
+		"order=name":            "order",
+		"filters[state]=x":      "filters[state]",
+		"fields[client]=id":     "fields[client]", // no sparse fieldsets by type
+		"sort[name]=asc":        "sort[name]",
+		"_=1&limit=50":          "limit",
+		"filter[state]=x&q=abc": "q",
+	} {
+		_, err := Parse(mustQuery(t, raw))
+		if err == nil {
+			t.Errorf("%q accepted", raw)
+			continue
+		}
+		if !strings.Contains(err.Error(), strconv.Quote(name)) {
+			t.Errorf("%q: %v — the refusal must name %q", raw, err, name)
+		}
+	}
+}
+
+func mustQuery(t *testing.T, raw string) url.Values {
+	t.Helper()
+	v, err := url.ParseQuery(raw)
+	if err != nil {
 		t.Fatal(err)
 	}
+	return v
 }
 
 func TestJSONArgs_NullWhenEmpty(t *testing.T) {

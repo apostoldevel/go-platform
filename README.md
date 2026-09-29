@@ -112,7 +112,7 @@ Session context in db-platform is per transaction, not per connection: under a p
 | | |
 |---|---|
 | Resources | plural nouns, one per `api.*` family: `/api/v2/users`, `/api/v2/users/{id}`, `/api/v2/users/{id}/groups` |
-| List | `GET /api/v2/<xs>?filter[state]=enabled&filter[created][gte]=…&filter[state][in]=a,b&sort=-created,name&fields=id,name&page[limit]=50&page[offset]=100` → `{items, total, limit, offset}`; `filter` and `sort` become the `search`/`orderby` jsonb of `api.sql()` — the operator language stays in the database, Go only renames; `fields` is applied to the rows in Go |
+| List | `GET /api/v2/<xs>?filter[state]=enabled&filter[created][gte]=…&filter[state][in]=a,b&sort=-created,name&fields=id,name&page[limit]=50&page[offset]=100` → `{items, total, limit, offset}`; `filter` and `sort` become the `search`/`orderby` jsonb of `api.sql()` — the operator language stays in the database, Go only renames; `fields` is applied to the rows in Go; a parameter the list does not know whose name up to the first `[` is a-z only (JSON:API reserves such names) — `limit`, `filters[state]`, `fields[client]` — is refused (`400`, the name in `detail`), any other name (`_`, `utm_source`) is ignored |
 | Row | `GET …/{id}` → the row with a weak `ETag`; `If-None-Match` → `304`; a `null` row is `404` |
 | Create | `POST /api/v2/<xs>` → `201`, `Location`, `ETag`; `Idempotency-Key` replays the answer for the same body |
 | Update | `PATCH …/{id}` with `If-Match` (`428` without it, `412` when stale) |
