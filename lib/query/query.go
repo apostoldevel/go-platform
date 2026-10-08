@@ -41,8 +41,9 @@ type Params struct {
 }
 
 var (
-	ident = regexp.MustCompile(`^[a-z_][a-z0-9_]*$`)
-	key   = regexp.MustCompile(`^(filter|page)\[([^\]]+)\](?:\[([^\]]+)\])?$`)
+	ident    = regexp.MustCompile(`^[a-z_][a-z0-9_]*$`)
+	key      = regexp.MustCompile(`^(filter|page)\[([^\]]+)\](?:\[([^\]]+)\])?$`)
+	reserved = regexp.MustCompile(`^[a-z]+$`)
 )
 
 var operators = map[string]string{
@@ -50,8 +51,14 @@ var operators = map[string]string{
 	"like": "LKE", "ilike": "IKE", "in": "", "null": "",
 }
 
-// Parse validates and translates. Unknown top-level parameters are ignored;
-// a malformed known one is an error (HTTP 400 for the caller).
+// Parse validates and translates; an error is HTTP 400 for the caller.
+//
+// Parameter names follow JSON:API 1.1 (§ Query Parameters): a name whose
+// family — the part before the first "[" — is made of a-z only belongs to
+// the list language, and one Parse does not know is refused, since ignoring
+// a typo (limit=, filters[state]=) turns a selection into "everything". A
+// name with any other character (_, utm_source, cacheBust) is the client's
+// own and is ignored.
 func Parse(v url.Values) (Params, error) {
 	p := Params{Limit: DefaultLimit}
 	keys := make([]string, 0, len(v))
@@ -99,6 +106,11 @@ func Parse(v url.Values) (Params, error) {
 				return p, err
 			}
 			p.Search = append(p.Search, c)
+		default:
+			family, _, _ := strings.Cut(k, "[")
+			if reserved.MatchString(family) {
+				return p, fmt.Errorf("unknown parameter %q (list parameters: filter[…], sort, fields, page[limit], page[offset])", k)
+			}
 		}
 	}
 	return p, nil
