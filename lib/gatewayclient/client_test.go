@@ -2,11 +2,12 @@ package gatewayclient_test
 
 import (
 	"context"
-	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -124,23 +125,58 @@ func TestDrop_ReconnectsAndReregisters(t *testing.T) {
 	}
 }
 
-func TestReplaced_1001_DoesNotReconnect(t *testing.T) {
-	stub := gatewaystub.New(t, gatewaystub.Options{Secret: testSecret, Audience: "gateway-test", HeartbeatInterval: 1})
-	c, rec := module(t, stub, nil)
-	_, done := run(t, c)
-	stub.WaitRegistered(t, 2*time.Second)
-	stub.Replace() // closes the socket 1001 as a newer registration would
-	rec.Wait(t, gatewayclient.EventReplaced, 2*time.Second)
-	select {
-	case err := <-done:
-		if !errors.Is(err, gatewayclient.ErrReplaced) {
-			t.Fatalf("Run returned %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("Run did not return after 1001")
+// K2: a module MUST reconnect after 1001 — a newer registration of the same
+// instance, or a gateway process going away (worker stop, pod roll).
+func TestClose1001_ReconnectsWithoutRestart(t *testing.T) {
+	for name, kick := range map[string]func(*gatewaystub.Stub){
+		"replaced":   (*gatewaystub.Stub).Replace,
+		"going away": func(s *gatewaystub.Stub) { s.Kick(1001, "going away") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			stub := gatewaystub.New(t, gatewaystub.Options{Secret: testSecret, Audience: "gateway-test", HeartbeatInterval: 1})
+			c, rec := module(t, stub, nil)
+			_, done := run(t, c)
+			rec.Wait(t, gatewayclient.EventRegistered, 2*time.Second)
+			kick(stub)
+			rec.Wait(t, gatewayclient.EventReplaced, 2*time.Second)
+			stub.WaitRegistrations(t, 2, 3*time.Second)
+			rec.WaitN(t, gatewayclient.EventRegistered, 2, 2*time.Second)
+			if c.State() != gatewayclient.Ready {
+				t.Fatalf("state %s", c.State())
+			}
+			select {
+			case err := <-done:
+				t.Fatalf("Run returned %v after 1001", err)
+			default:
+			}
+		})
 	}
-	if n := stub.Registrations(); n != 1 {
-		t.Fatalf("registrations %d, want 1", n)
+}
+
+// Two instances under one name replace each other; each 1001 soon after its
+// registration slows the next attempt down (1→30 s) instead of every second.
+func TestClose1001_InARow_BacksOff(t *testing.T) {
+	stub := gatewaystub.New(t, gatewaystub.Options{Secret: testSecret, Audience: "gateway-test", HeartbeatInterval: 1})
+	var attempts []int
+	var mu sync.Mutex
+	c, rec := module(t, stub, func(cfg *gatewayclient.Config) {
+		cfg.Reconnect = func(n int) time.Duration {
+			mu.Lock()
+			attempts = append(attempts, n)
+			mu.Unlock()
+			return 20 * time.Millisecond
+		}
+	})
+	run(t, c)
+	for i := 1; i <= 3; i++ {
+		rec.WaitN(t, gatewayclient.EventRegistered, i, 3*time.Second)
+		stub.Replace()
+	}
+	rec.WaitN(t, gatewayclient.EventRegistered, 4, 3*time.Second)
+	mu.Lock()
+	defer mu.Unlock()
+	if !slices.Equal(attempts, []int{0, 1, 2}) {
+		t.Fatalf("reconnect attempts %v, want [0 1 2]", attempts)
 	}
 }
 

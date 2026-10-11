@@ -1,7 +1,8 @@
 // Command gatewaystub runs the stub of GatewayAPI's control plane
 // standalone: ws://<addr>/gateway/{module}/{instance}, a fake POST /oauth2/token
-// (client_credentials for the configured audience) and GET /gateway/list with
-// what the stub has seen. For running a GoAPI module without the real gateway.
+// (client_credentials for the configured audience), GET /gateway/list with
+// what the stub has seen and POST /gateway/kick?code=1001 that closes the
+// module's socket. For running a GoAPI module without the real gateway.
 package main
 
 import (

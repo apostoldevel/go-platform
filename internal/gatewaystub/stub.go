@@ -236,7 +236,7 @@ func (s *Stub) serve(c *conn, module, instance string) {
 			s.changed.Broadcast()
 			s.mu.Unlock()
 			registered = true
-			s.send(c, f.Result(map[string]any{"heartbeat_interval": s.opts.HeartbeatInterval, "instance_id": instance, "gateway_worker": 4242, "suspect_after": s.opts.SuspectAfter, "offline_after": s.opts.OfflineAfter}))
+			s.send(c, f.Result(map[string]any{"heartbeat_interval": s.opts.HeartbeatInterval, "instance_id": instance, "gateway_worker": 4242, "gateway_node": "stub:4242", "suspect_after": s.opts.SuspectAfter, "offline_after": s.opts.OfflineAfter}))
 			go s.watchHeartbeat(ctx, c)
 		case "/heartbeat":
 			var hb Heartbeat
@@ -543,6 +543,17 @@ func (s *Stub) WaitStatus(t testing.TB, state string, timeout time.Duration) Sta
 		return false
 	})
 	return found
+}
+
+// Statuses returns the states of every /status so far, in arrival order.
+func (s *Stub) Statuses() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, len(s.statuses))
+	for i, st := range s.statuses {
+		out[i] = st.State
+	}
+	return out
 }
 
 // WaitUnregister blocks until /unregister arrived.
