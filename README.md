@@ -44,6 +44,7 @@ version.go             DBPlatform — the db-platform version the integration te
 lib/
   auth/jwt/            HS256/384/512 verification with the secrets of the OAuth2 providers; Keyring, Claims
   gateway/frame/       the control-plane frame {t,u,a,p,c,m}: CALL, CALLRESULT, CALLERROR; 64 KiB limit
+  entity/              the declarative entity package: entity.New over api.<x> — the six routes, q= term search, KnownKeys; platform and project entities are mounted by one form
   gatewayclient/       connect, /register, heartbeat, /status, /unregister; /ping, /drain, /reload; reconnect
   pgtx/                one request = one transaction: daemon.begin → SAVEPOINT → daemon.call … → daemon.end → COMMIT (the daemon role, db-platform 1.2.31); a refusal is journalled too
   problem/             application/problem+json with the database's error catalogue

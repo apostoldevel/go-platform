@@ -70,7 +70,7 @@ type Entity struct {
 	Prefix       string        // "/api/v2/invoices"
 	Resource     rest.Resource // api.get_/list_/count_<x>
 	SetFn        string        // "api.set_<x>" — called with Body.Args
-	UpdateFn     string        // when set, PATCH calls it instead of SetFn — for a catalogue whose api.set_<x> coalesces what api.update_<x> keeps (a column that falls back to a default): a PATCH must move only what it was given
+	UpdateFn     string        // when set, PATCH calls it instead of SetFn (a catalogue whose api.set_<x> coalesces what api.update_<x> keeps: a PATCH must move only what it was given)
 	NewBody      func() rest.Body
 	SearchFields []string // columns of api.<x> one term of q= is matched against
 	// Defaults, when set, fills on create what the database will not accept

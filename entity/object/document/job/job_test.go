@@ -15,10 +15,9 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// The test harness the platform packages share in shape with
-// configuration/csms/lib/entity/entitytest, which the module boundary
-// forbids importing: the package under the platform host with a database
-// that must not be reached.
+// The test harness the platform packages share in shape with a project's
+// entitytest, which the module boundary forbids importing: the package under
+// the platform host with a database that must not be reached.
 
 // keys is the test audience the host verifies tokens against.
 var keys = jwt.Keyring{Audiences: map[string]jwt.Key{"web-test": {Alg: "HS256", Secret: []byte("s")}}, Issuers: []string{"accounts.test"}}
