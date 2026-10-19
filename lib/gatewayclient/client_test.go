@@ -417,14 +417,26 @@ func TestGatewayCloses1011_Reconnects(t *testing.T) {
 
 func TestReload_WithoutChanges_DoesNotReregister(t *testing.T) {
 	stub := gatewaystub.New(t, gatewaystub.Options{Secret: testSecret, Audience: "gateway-test", HeartbeatInterval: 1})
+	var reloads atomic.Int32
 	c, _ := module(t, stub, func(cfg *gatewayclient.Config) {
 		cfg.OnReload = func() gatewayclient.Registration {
+			reloads.Add(1)
 			return gatewayclient.Registration{Prefixes: []string{"/api/v2/clients"}}
 		}
 	})
 	run(t, c)
 	stub.WaitRegistered(t, 2*time.Second)
 	stub.Call(t, "/reload", nil, 2*time.Second)
+	// the answer comes before the hook runs: without waiting for the hook
+	// the check below could pass without the no-change branch ever being taken;
+	// 300 ms below outlasts a wrong re-registration (module() reconnects in 20 ms)
+	deadline := time.Now().Add(5 * time.Second)
+	for reloads.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("OnReload not called after /reload")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	time.Sleep(300 * time.Millisecond)
 	if n := stub.Registrations(); n != 1 {
 		t.Fatalf("registrations %d, want 1", n)
