@@ -294,8 +294,11 @@ func TestReload_CallsHookAndReregistersWhenPrefixesChange(t *testing.T) {
 	run(t, c)
 	stub.WaitRegistered(t, 2*time.Second)
 	res := stub.Call(t, "/reload", nil, 2*time.Second)
-	if res.Type != 3 || reloads.Load() != 1 {
-		t.Fatalf("%+v reloads=%d", res, reloads.Load())
+	// the client answers /reload first and runs the hook after (as on
+	// /drain), so the answer says nothing about the hook yet: the hook's
+	// effect is awaited below
+	if res.Type != 3 {
+		t.Fatalf("%+v", res)
 	}
 	// a reconnect after a lost socket also registers (with the old prefixes),
 	// so the count alone proves nothing: wait for the registration that
@@ -304,6 +307,9 @@ func TestReload_CallsHookAndReregistersWhenPrefixesChange(t *testing.T) {
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		if got := stub.LastRegistration().Prefixes; len(got) == 2 {
+			if n := reloads.Load(); n != 1 {
+				t.Fatalf("hook ran %d times, want 1", n)
+			}
 			return
 		}
 		if time.Now().After(deadline) {
