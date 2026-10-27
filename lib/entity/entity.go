@@ -89,6 +89,13 @@ type Entity struct {
 	// (a tenant derived from the parent object). Declared so the
 	// write-signature grid knows the gap is a decision, not a drift.
 	CreateExtra []string
+	// Row, when set, is the zero value of a struct that names the columns of
+	// api.<x> with their json, doc and format tags (openapi.Schema). It makes
+	// the entity described in the OpenAPI document (Operations); without it
+	// the entity is not, since a row that is raw JSON has no type to
+	// describe. The struct must carry the columns the database really gives —
+	// the parity tool (-spec) holds the document to real rows.
+	Row any
 }
 
 // Config wires a package; JWT, request id and in-flight accounting are the
@@ -152,13 +159,11 @@ func (m *Module) Prefixes() []string { return []string{m.Prefix} }
 // with routes of its own (a DELETE, a /history) registers them beside these
 // in its own Routes.
 func (m *Module) Routes(mux *http.ServeMux) {
-	p := m.Prefix
-	mux.HandleFunc("GET "+p, m.List)
-	mux.HandleFunc("GET "+p+"/{id}", rest.RowFunc(m.Doer, m.Log, idArg, m.getRow))
-	mux.HandleFunc("POST "+p, m.creator.Create(m.Doer, m.Idem, m.Log))
-	mux.HandleFunc("PATCH "+p+"/{id}", m.Update)
-	mux.HandleFunc("POST "+p+"/{id}/actions/{action}", m.Action)
-	mux.HandleFunc("GET "+p+"/{id}/methods", m.Methods)
+	// the table is the description's too (openapi.go): what is mounted and
+	// what Operations says of it come from the same six entries
+	for _, r := range m.form() {
+		mux.HandleFunc(r.op.Pattern(), r.h)
+	}
 }
 
 // getRow is the read behind GET <xs>/{id}: the row of api.get_<x>, with no

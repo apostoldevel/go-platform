@@ -27,13 +27,13 @@ import (
 
 // Problem is one problem+json document. It is also an error.
 type Problem struct {
-	Type      string  `json:"type"`
-	Title     string  `json:"title"`
-	Status    int     `json:"status"`
-	Detail    string  `json:"detail,omitempty"`
-	Instance  string  `json:"instance,omitempty"`
-	RequestID string  `json:"request_id,omitempty"`
-	Code      *string `json:"code"` // ERR-GGG-CCC or null
+	Type      string  `json:"type" doc:"urn:apostol:error:ERR-GGG-CCC for a catalogue error, urn:apostol:error:<slug> (unauthorized, validation, not-found, precondition-failed, precondition-required, conflict, internal, raise, and others) for one the module makes itself; read the slug as a class that may grow, not as a closed list."`
+	Title     string  `json:"title" doc:"Short text of the problem, in the language of the session where there is one."`
+	Status    int     `json:"status" doc:"The HTTP status of the answer."`
+	Detail    string  `json:"detail,omitempty" doc:"What exactly is wrong with this request."`
+	Instance  string  `json:"instance,omitempty" doc:"The path of the request."`
+	RequestID string  `json:"request_id,omitempty" doc:"The X-Request-Id of the request."`
+	Code      *string `json:"code" doc:"The machine key ERR-GGG-CCC of the error catalogue; null where the catalogue has none."` // ERR-GGG-CCC or null
 
 	noCredentials bool // a 401 to a request with no bearer: challenge without an error code
 }
