@@ -15,9 +15,11 @@
 //     refuses only the unknown names made of a-z (JSON:API reserves them) and
 //     ignores the rest: the keys are checked before Parse (KnownKeys); q= is
 //     taken only by an entity with SearchFields, once (listArgs); a repeated
-//     q= is 400. GET <xs>/{id} reads no query at all — `fields` of v1's
-//     /<x>/get is dropped, a query string there is ignored, not refused
-//     (rest.RowHandler).
+//     q= is 400. GET <xs>/{id} takes `fields` as v1's /<x>/get does and
+//     nothing else — any other key is 400, as in a list; the body is cut,
+//     the ETag stays the whole row's (getFields). An unknown key, in a body or
+//     in a query, carries ERR-400-061 and a missing body ERR-400-060 — the
+//     codes of v1 for the same refusals.
 //   - api.get_<x> must answer an unknown or invisible id with no row, and
 //     no row is 404. A function that RETURNS SETOF api.<x> does; one that
 //     RETURNS a bare composite answers a missing id with one row of NULLs — read as 404 here by the null id, so the form
@@ -115,6 +117,7 @@ type Module struct {
 	writable rest.Writable
 	creator  rest.Writable
 	methods  http.HandlerFunc
+	get      http.HandlerFunc
 }
 
 // New wires the entity.
@@ -137,6 +140,7 @@ func New(e Entity, cfg Config) *Module {
 		e.NewBody().Args(nil)
 	}()
 	m.methods = m.RowsOf("get_object_methods", "object") // the function ends in ORDER BY sequence
+	m.get = rest.RowFieldsFunc(m.Doer, m.Log, idArg, m.getRow, fieldsOf)
 	return m
 }
 
@@ -206,7 +210,7 @@ func KnownKeys(values url.Values, plain ...string) error {
 			known = known || k == p
 		}
 		if !known {
-			return problem.New(400, "validation", "Bad request", "unknown parameter "+k)
+			return problem.New(400, "validation", "Bad request", "unknown parameter "+k).WithCode(problem.CodeJSONKey)
 		}
 	}
 	return nil
@@ -277,6 +281,23 @@ func (m *Module) List(w http.ResponseWriter, r *http.Request) {
 	rest.WriteJSON(w, 200, body)
 }
 
+// fieldsOf is the query of a route that takes `fields` and nothing else
+// (GET <xs>/{id}, the sets of RowsOf): any other key is 400, the names are
+// lib/query's. None named is nil — the whole row.
+func fieldsOf(r *http.Request) ([]string, error) {
+	values := r.URL.Query()
+	for k := range values {
+		if k != "fields" { // not even filter[…] and page[…], which KnownKeys lets through
+			return nil, problem.New(400, "validation", "Bad request", "only fields= is taken here, not "+k).WithCode(problem.CodeJSONKey)
+		}
+	}
+	p, err := query.Parse(values)
+	if err != nil {
+		return nil, problem.New(400, "validation", "Bad request", err.Error())
+	}
+	return p.Fields, nil
+}
+
 // Current is the visible row of {id} inside the transaction, 404 otherwise
 // (a get of a missing id answers no row — pgtx.ErrNoRow from the SETOF
 // shape, or read off the null id of the bare-composite's row of NULLs —
@@ -316,7 +337,11 @@ func (m *Module) Update(w http.ResponseWriter, r *http.Request) {
 	b := m.NewBody()
 	raw, err := rest.ReadBody(r, b)
 	if err == nil && emptyBody(b) {
-		err = problem.New(400, "validation", "Bad request", "body must carry at least one field")
+		empty := problem.New(400, "validation", "Bad request", "body must carry at least one field")
+		if len(raw) == 0 {
+			empty = empty.WithCode(problem.CodeJSONEmpty)
+		}
+		err = empty
 	}
 	if err == nil {
 		err = b.Validate(false)
@@ -414,6 +439,10 @@ func (m *Module) Action(w http.ResponseWriter, r *http.Request) {
 	rest.WriteJSON(w, 200, row)
 }
 
+// Get is GET <xs>/{id}: the visible row (404 otherwise) with its ETag, honouring
+// If-None-Match; `fields` cuts the body and nothing else is taken (fieldsOf).
+func (m *Module) Get(w http.ResponseWriter, r *http.Request) { m.get(w, r) }
+
 // Methods is GET <xs>/{id}/methods: api.get_object_methods of a visible
 // row, in the order the workflow gives them.
 func (m *Module) Methods(w http.ResponseWriter, r *http.Request) { m.methods(w, r) }
@@ -430,15 +459,9 @@ func (m *Module) RowsOf(fn, key string) http.HandlerFunc {
 			rest.Fail(w, r, m.Log, err)
 			return
 		}
-		for k := range r.URL.Query() {
-			if k != "fields" {
-				rest.Fail(w, r, m.Log, problem.New(400, "validation", "Bad request", "only fields= is taken here, not "+k))
-				return
-			}
-		}
-		fields, err := query.Parse(r.URL.Query())
+		fields, err := fieldsOf(r)
 		if err != nil {
-			rest.Fail(w, r, m.Log, problem.New(400, "validation", "Bad request", err.Error()))
+			rest.Fail(w, r, m.Log, err)
 			return
 		}
 		var items []json.RawMessage
@@ -451,7 +474,7 @@ func (m *Module) RowsOf(fn, key string) http.HandlerFunc {
 				return err
 			}
 			for _, row := range rows {
-				items = append(items, rest.Project(row, fields.Fields))
+				items = append(items, rest.Project(row, fields))
 			}
 			return nil
 		})

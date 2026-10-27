@@ -6,7 +6,6 @@ import (
 
 	"github.com/apostoldevel/go-platform/lib/openapi"
 	"github.com/apostoldevel/go-platform/lib/query"
-	"github.com/apostoldevel/go-platform/lib/rest"
 )
 
 // MethodRow is a row of api.get_object_methods (view api.method of the
@@ -138,12 +137,15 @@ func (m *Module) form() []formRoute {
 		{openapi.Operation{
 			Method: "GET", Path: p + "/{id}", ID: id + "_get", Tag: plural,
 			Summary: "Get a " + noun,
-			Params: []openapi.Param{idParam, {Name: "If-None-Match", In: "header", Schema: map[string]any{"type": "string"},
-				Description: "The ETag of the copy the client holds: when it is current the answer is 304 with no body."}},
+			Params: []openapi.Param{idParam,
+				{Name: "fields", In: "query", Schema: map[string]any{"type": "string"},
+					Description: "Comma-separated properties to return; the others are left out. The ETag is that of the whole row."},
+				{Name: "If-None-Match", In: "header", Schema: map[string]any{"type": "string"},
+					Description: "The ETag of the copy the client holds: when it is current the answer is 304 with no body."}},
 			Responses: errs(ok("The row.", etag),
 				openapi.Response{Status: "304", Description: "The row has not changed since If-None-Match. No body.", Headers: []openapi.Header{etag}},
-				bad("The id is not a UUID."), notFound),
-		}, rest.RowFunc(m.Doer, m.Log, idArg, m.getRow)},
+				bad("The id is not a UUID, a bad fields value, or a query parameter other than fields."), notFound),
+		}, m.Get},
 		{openapi.Operation{
 			Method: "POST", Path: p, ID: id + "_create", Tag: plural,
 			Summary:     "Create a " + noun,

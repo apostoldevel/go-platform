@@ -3,6 +3,7 @@ package rest_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -53,6 +54,25 @@ func TestIDOf_RefusesNonUUID(t *testing.T) {
 	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/x/7f3a0000-0000-4000-8000-000000000001", nil))
 	if err != nil || got != "7f3a0000-0000-4000-8000-000000000001" {
 		t.Fatalf("%q %v", got, err)
+	}
+}
+
+// The unknown key carries the code v1 gives it (IncorrectJsonKey); the mark is
+// the text of encoding/json, which has no typed error for it — this test is
+// what breaks if a Go release rewords it.
+func TestReadBody_UnknownKeyCode(t *testing.T) {
+	var into struct {
+		Name *string `json:"name"`
+	}
+	_, err := rest.ReadBody(httptest.NewRequest("POST", "/", strings.NewReader(`{"name":"a","nope":1}`)), &into)
+	var p *problem.Problem
+	if !errors.As(err, &p) || p.Status != 400 || p.Code == nil || *p.Code != "ERR-400-061" {
+		t.Fatalf("%#v", err)
+	}
+	// any other decode failure is a 400 with no code
+	_, err = rest.ReadBody(httptest.NewRequest("POST", "/", strings.NewReader(`{"name":1}`)), &into)
+	if !errors.As(err, &p) || p.Status != 400 || p.Code != nil {
+		t.Fatalf("%#v", err)
 	}
 }
 
@@ -211,5 +231,71 @@ func TestRowsOf_ArgsErrorIsAnsweredWithoutDB(t *testing.T) {
 	h(rec, httptest.NewRequest("GET", "/x", nil))
 	if rec.Code != 400 {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+}
+
+// doerRun runs the read inside the handler with no transaction: the read of
+// these tests is a canned row.
+type doerRun struct{}
+
+func (doerRun) Do(ctx context.Context, _ pgtx.Session, _ *pgtx.Request, fn func(context.Context, pgx.Tx) error) error {
+	return fn(ctx, nil)
+}
+
+// RowFieldsFunc cuts the body to the fields and leaves the ETag, and the 304
+// of If-None-Match, to the whole row: the tag is the version of the row — the
+// If-Match of a PATCH is compared with the whole row too.
+func TestRowFieldsFunc_CutsBodyNotTheTag(t *testing.T) {
+	row := json.RawMessage(`{"id":"1","code":"RUB","name":"Ruble","lastupdate":"2026-10-27T10:00:00"}`)
+	id := func(*http.Request) (pgtx.Args, error) { return pgtx.Args{"id": "1"}, nil }
+	read := func(context.Context, pgx.Tx, pgtx.Args) (json.RawMessage, error) { return row, nil }
+	fields := func(r *http.Request) ([]string, error) {
+		if r.URL.RawQuery == "bad" {
+			return nil, problem.New(400, "validation", "Bad request", "bad")
+		}
+		if r.URL.RawQuery == "" {
+			return nil, nil
+		}
+		return []string{"code", "nope"}, nil
+	}
+	h := rest.RowFieldsFunc(doerRun{}, nil, id, read, fields)
+	get := func(q string, hdr ...string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("GET", "/x/1?"+q, nil)
+		for i := 0; i+1 < len(hdr); i += 2 {
+			req.Header.Set(hdr[i], hdr[i+1])
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	rec := get("cut")
+	if rec.Code != 200 || rec.Body.String() != `{"code":"RUB"}` {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	if tag := rec.Header().Get("ETag"); tag != `W/"2026-10-27T10:00:00"` {
+		t.Fatalf("the tag of the cut body %q is not the whole row's", tag)
+	}
+	if rec = get(""); rec.Code != 200 || !strings.Contains(rec.Body.String(), `"name":"Ruble"`) {
+		t.Fatalf("no fields is the whole row: %d %s", rec.Code, rec.Body)
+	}
+	if rec = get("cut", "If-None-Match", `W/"2026-10-27T10:00:00"`); rec.Code != 304 || rec.Body.Len() != 0 {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	if rec = get("bad"); rec.Code != 400 {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+}
+
+// A bad fields is refused before the database.
+func TestRowFieldsFunc_BadFieldsWithoutDB(t *testing.T) {
+	h := rest.RowFieldsFunc(noDB{t}, nil,
+		func(*http.Request) (pgtx.Args, error) { return pgtx.Args{}, nil }, nil,
+		func(*http.Request) ([]string, error) {
+			return nil, problem.New(400, "validation", "Bad request", "bad")
+		})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/x/1", nil))
+	if rec.Code != 400 {
+		t.Fatalf("%d", rec.Code)
 	}
 }

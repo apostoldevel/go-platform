@@ -142,7 +142,13 @@ func ReadBody(r *http.Request, into any) ([]byte, error) {
 	dec := json.NewDecoder(strings.NewReader(string(raw)))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(into); err != nil {
-		return nil, problem.New(400, "validation", "Bad request", err.Error())
+		bad := problem.New(400, "validation", "Bad request", err.Error())
+		// encoding/json has no typed error for DisallowUnknownFields: its
+		// text is the only mark, pinned by TestReadBody_UnknownKeyCode
+		if strings.HasPrefix(err.Error(), "json: unknown field ") {
+			bad = bad.WithCode(problem.CodeJSONKey)
+		}
+		return nil, bad
 	}
 	return raw, nil
 }
@@ -256,7 +262,7 @@ func CallRowsOf(d Doer, log *slog.Logger, fn string, args func(*http.Request) (p
 func CallRowHandler(d Doer, log *slog.Logger, fn string, args func(*http.Request) (pgtx.Args, error)) http.HandlerFunc {
 	return rowHandler(d, log, args, func(ctx context.Context, tx pgx.Tx, a pgtx.Args) (json.RawMessage, error) {
 		return pgtx.CallRow(ctx, tx, fn, a)
-	})
+	}, nil)
 }
 
 // RowHandler answers one row of an api.* query keyed by the request — a
@@ -273,21 +279,35 @@ func RowHandler(d Doer, log *slog.Logger, sql string, args func(*http.Request) (
 			return nil, pgtx.ErrNoRow
 		}
 		return row, err
-	})
+	}, nil)
 }
 
 // RowFunc is the one-row answer over any read — a call whose row is shaped
 // in Go (a scalar wrapped into an object, a projection): pgtx.ErrNoRow is
 // 404, the row carries an ETag and honours If-None-Match.
 func RowFunc(d Doer, log *slog.Logger, args func(*http.Request) (pgtx.Args, error), read func(context.Context, pgx.Tx, pgtx.Args) (json.RawMessage, error)) http.HandlerFunc {
-	return rowHandler(d, log, args, read)
+	return rowHandler(d, log, args, read, nil)
+}
+
+// RowFieldsFunc is RowFunc whose body is cut to the fields the request names:
+// fields decides them (its error is answered as is; none means the whole row).
+// The ETag and If-None-Match are those of the whole row, not of the cut — the
+// tag names the version of the row, and the If-Match of a PATCH is compared
+// with the whole row too.
+func RowFieldsFunc(d Doer, log *slog.Logger, args func(*http.Request) (pgtx.Args, error), read func(context.Context, pgx.Tx, pgtx.Args) (json.RawMessage, error), fields func(*http.Request) ([]string, error)) http.HandlerFunc {
+	return rowHandler(d, log, args, read, fields)
 }
 
 // rowHandler is the one-row answer of RowHandler and CallRowHandler: no row
-// is 404, the row carries an ETag and honours If-None-Match.
-func rowHandler[A any](d Doer, log *slog.Logger, args func(*http.Request) (A, error), read func(context.Context, pgx.Tx, A) (json.RawMessage, error)) http.HandlerFunc {
+// is 404, the row carries an ETag and honours If-None-Match. fields, when set,
+// is read before the database and cuts the body, never the ETag.
+func rowHandler[A any](d Doer, log *slog.Logger, args func(*http.Request) (A, error), read func(context.Context, pgx.Tx, A) (json.RawMessage, error), fields func(*http.Request) ([]string, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		a, err := args(r)
+		var cut []string
+		if err == nil && fields != nil {
+			cut, err = fields(r)
+		}
 		if err != nil {
 			Fail(w, r, log, err)
 			return
@@ -314,7 +334,7 @@ func rowHandler[A any](d Doer, log *slog.Logger, args func(*http.Request) (A, er
 			w.WriteHeader(304)
 			return
 		}
-		WriteJSON(w, 200, row)
+		WriteJSON(w, 200, Project(row, cut))
 	}
 }
 

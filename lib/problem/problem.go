@@ -51,6 +51,8 @@ func (p *Problem) Error() string {
 const (
 	CodeLoginFailed  = "ERR-401-001" // no credentials, a token that does not verify, a session the database does not know
 	CodeTokenExpired = "ERR-401-008" // a verified token whose time is over
+	CodeJSONEmpty    = "ERR-400-060" // a body that must carry a JSON object is empty (v1: JsonIsEmpty)
+	CodeJSONKey      = "ERR-400-061" // a key the route does not take, in a body or a query (v1: IncorrectJsonKey)
 )
 
 // Catalogue gives the catalogue message of a code, to title a problem the

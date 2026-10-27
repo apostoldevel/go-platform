@@ -115,6 +115,27 @@ func Template(t *testing.T, m platform.Module, prefix string) {
 		ProblemOf(t, Do(h, "GET", prefix+"/"+ID+"/methods"+q, ""), 400)
 	}
 	ProblemOf(t, Do(h, "POST", prefix, ``), 400)
+	// the codes v1 gives the same refusals (IncorrectJsonKey, JsonIsEmpty): an
+	// unknown key in a query or a body, an empty body; GET {id} takes fields
+	// and nothing else, filter[…] and page[…] included
+	for _, c := range []struct{ method, path, body, code string }{
+		{"GET", prefix + "?limit=10", "", "ERR-400-061"},
+		{"GET", prefix + "/" + ID + "?limit=10", "", "ERR-400-061"},
+		{"GET", prefix + "/" + ID + "?filter[name]=x", "", "ERR-400-061"},
+		{"GET", prefix + "/" + ID + "?fields=name&page[limit]=1", "", "ERR-400-061"},
+		{"GET", prefix + "/" + ID + "/methods?sort=sequence", "", "ERR-400-061"},
+		{"PATCH", prefix + "/" + ID, `{"no_such_key":"x"}`, "ERR-400-061"},
+		{"POST", prefix, `{"no_such_key":"x"}`, "ERR-400-061"},
+		{"POST", prefix, ``, "ERR-400-060"},
+		{"PATCH", prefix + "/" + ID, ``, "ERR-400-060"},
+		{"PATCH", prefix + "/" + ID, `{}`, ""},           // an empty object is not an empty body
+		{"GET", prefix + "/" + ID + "?fields=A", "", ""}, // a name lib/query refuses: the module's own 400
+	} {
+		p := ProblemOf(t, Do(h, c.method, c.path, c.body, "If-Match", `W/"1"`), 400)
+		if got, _ := p["code"].(string); got != c.code {
+			t.Errorf("%s %s %q: code %q, want %q", c.method, c.path, c.body, got, c.code)
+		}
+	}
 	ProblemOf(t, Do(h, "POST", prefix+"/"+ID+"/actions/Enable", ""), 400)
 	ProblemOf(t, Do(h, "POST", prefix+"/"+ID+"/actions/enable", "[1]"), 400)
 	ProblemOf(t, Do(h, "POST", prefix+"/"+ID+"/actions/enable", strings.Repeat(" ", 1<<20+1)+"{}"), 413)

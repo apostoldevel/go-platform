@@ -129,7 +129,7 @@ func (wr Writable) Create(d Doer, idem *Idempotency, log *slog.Logger) http.Hand
 		b := wr.NewBody()
 		raw, err := ReadBody(r, b)
 		if err == nil && len(raw) == 0 {
-			err = problem.New(400, "validation", "Bad request", "a JSON body is required")
+			err = problem.New(400, "validation", "Bad request", "a JSON body is required").WithCode(problem.CodeJSONEmpty)
 		}
 		if err == nil {
 			err = b.Validate(true)
