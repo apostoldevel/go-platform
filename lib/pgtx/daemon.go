@@ -43,7 +43,7 @@ func (r *Runner) doDaemon(ctx context.Context, s Session, req *Request, fn func(
 		return r.internal("begin", errors.New("pgtx: the daemon road needs the request"))
 	}
 	req.LogID = 0
-	tx, err := r.Pool.Begin(ctx)
+	tx, err := r.begin(ctx)
 	if err != nil {
 		return r.internal("begin", err)
 	}

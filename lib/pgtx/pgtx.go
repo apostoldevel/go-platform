@@ -44,6 +44,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -84,6 +85,11 @@ type Runner struct {
 	Pool     *pgxpool.Pool
 	Features Features
 	Logger   *slog.Logger
+	// BeginTimeout bounds how long a request waits to start its transaction
+	// (a free connection, a new one, BEGIN); zero means DefaultBeginTimeout.
+	// A database that does not answer is a fast 500, not a wait for the
+	// gateway's cut-off.
+	BeginTimeout time.Duration
 	// titles: the catalogue message of each code the platform refuses with
 	// itself (problem.Code*), read once at Detect — a refusal never asks the
 	// database for its own wording
@@ -250,11 +256,109 @@ func (r *Runner) authorizeSQL() string {
 	return "SELECT authorized, message FROM api.authorize($1, $2, $3::inet)"
 }
 
-// NewPool opens a pgx pool that resets session state on every release.
-func NewPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
+// Pool and request limits. The gateway cuts a request at 30 s; a database
+// that does not answer must be refused well before that, and the connections
+// a pool keeps are a share of the pooler's budget, not of the host's CPUs.
+const (
+	// DefaultBeginTimeout is Runner.BeginTimeout when it is zero.
+	DefaultBeginTimeout = 5 * time.Second
+	// DefaultConnectTimeout applies when the DSN has no connect_timeout.
+	DefaultConnectTimeout = 5 * time.Second
+	// DefaultMaxConns applies when neither the DSN (pool_max_conns) nor
+	// WithMaxConns names a ceiling; pgx would take max(4, NumCPU).
+	DefaultMaxConns = 10
+	// DefaultMaxConnIdleTime applies when the DSN has no pool_max_conn_idle_time.
+	DefaultMaxConnIdleTime = 5 * time.Minute
+)
+
+// PoolOption changes the pool NewPool builds; it wins over the DSN.
+type PoolOption func(*pgxpool.Config)
+
+// WithMaxConns sets the pool's connection ceiling; n < 1 is ignored.
+func WithMaxConns(n int32) PoolOption {
+	return func(c *pgxpool.Config) {
+		if n >= 1 {
+			c.MaxConns = n
+		}
+	}
+}
+
+// dsnKeys returns the parameter names a DSN sets: the query of a URL, or
+// the key = value pairs of the keyword form (libpq: blanks around "=",
+// single-quoted values with backslash escapes). A name inside a value is not
+// a parameter.
+func dsnKeys(dsn string) map[string]bool {
+	keys := map[string]bool{}
+	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
+		if u, err := url.Parse(dsn); err == nil {
+			for k := range u.Query() {
+				keys[k] = true
+			}
+		}
+		return keys
+	}
+	for i := 0; i < len(dsn); {
+		for i < len(dsn) && dsn[i] == ' ' {
+			i++
+		}
+		start := i
+		for i < len(dsn) && dsn[i] != '=' && dsn[i] != ' ' {
+			i++
+		}
+		key := dsn[start:i]
+		for i < len(dsn) && dsn[i] == ' ' {
+			i++
+		}
+		if i >= len(dsn) || dsn[i] != '=' {
+			continue // a token with no value: not a pair
+		}
+		i++
+		for i < len(dsn) && dsn[i] == ' ' {
+			i++
+		}
+		if i < len(dsn) && dsn[i] == '\'' {
+			for i++; i < len(dsn) && dsn[i] != '\''; i++ {
+				if dsn[i] == '\\' {
+					i++
+				}
+			}
+			i++
+		} else {
+			for i < len(dsn) && dsn[i] != ' ' {
+				if dsn[i] == '\\' {
+					i++
+				}
+				i++
+			}
+		}
+		if key != "" {
+			keys[key] = true
+		}
+	}
+	return keys
+}
+
+// NewPool opens a pgx pool that resets session state on every release. What
+// the DSN names (connect_timeout, pool_max_conns, pool_max_conn_idle_time)
+// stays; what it leaves out gets the Default* limits above.
+func NewPool(ctx context.Context, dsn string, opts ...PoolOption) (*pgxpool.Pool, error) {
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, err
+	}
+	set := dsnKeys(dsn)
+	// PGCONNECT_TIMEOUT of the environment is the operator's as well
+	if !set["connect_timeout"] && cfg.ConnConfig.ConnectTimeout == 0 {
+		cfg.ConnConfig.ConnectTimeout = DefaultConnectTimeout
+	}
+	if !set["pool_max_conns"] {
+		cfg.MaxConns = DefaultMaxConns
+	}
+	if !set["pool_max_conn_idle_time"] {
+		cfg.MaxConnIdleTime = DefaultMaxConnIdleTime
+	}
+	for _, o := range opts {
+		o(cfg)
 	}
 	cfg.AfterRelease = func(conn *pgx.Conn) bool {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -263,6 +367,29 @@ func NewPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 		return err == nil // a connection that cannot be reset is dropped
 	}
 	return pgxpool.NewWithConfig(ctx, cfg)
+}
+
+func (r *Runner) beginTimeout() time.Duration {
+	if r.BeginTimeout <= 0 {
+		return DefaultBeginTimeout
+	}
+	return r.BeginTimeout
+}
+
+// begin starts the request transaction within BeginTimeout. The deadline
+// belongs to the start only: pgx does not keep the context once BEGIN is
+// done, so the transaction itself runs under the request's own context.
+func (r *Runner) begin(ctx context.Context) (pgx.Tx, error) {
+	bctx, cancel := context.WithTimeout(ctx, r.beginTimeout())
+	defer cancel()
+	tx, err := r.Pool.Begin(bctx)
+	if err != nil && r.Logger != nil {
+		// a refused start is a dead database or an exhausted pool; the pool's
+		// own counts tell which
+		st := r.Pool.Stat()
+		r.Logger.Warn("transaction not started", "err", err, "acquired", st.AcquiredConns(), "idle", st.IdleConns(), "total", st.TotalConns(), "max", st.MaxConns())
+	}
+	return tx, err
 }
 
 // Do runs fn inside the request transaction. The error returned is always a
@@ -276,7 +403,7 @@ func (r *Runner) Do(ctx context.Context, s Session, req *Request, fn func(ctx co
 	if req != nil {
 		req.LogID = 0
 	}
-	tx, err := r.Pool.Begin(ctx)
+	tx, err := r.begin(ctx)
 	if err != nil {
 		return r.internal("begin", err)
 	}
