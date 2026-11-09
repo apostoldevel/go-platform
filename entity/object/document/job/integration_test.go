@@ -149,7 +149,7 @@ func byCode(t *testing.T, runner *pgtx.Runner, session, list, code string) strin
 }
 
 // pair is two settled rows of api.list_job in code order — two objects every
-// stand has: the platform's init seeds the standard jobs.
+// database has: the platform's init seeds the standard jobs.
 func pair(t *testing.T, runner *pgtx.Runner, session string) [2]string {
 	t.Helper()
 	cut := time.Now().Add(-10 * time.Minute).UTC().Format(time.RFC3339)
@@ -245,7 +245,7 @@ func TestIntegration_JobLifecycle(t *testing.T) {
 	}
 }
 
-// TestIntegration_JobWriteEcho is the third layer of the write check (T237),
+// TestIntegration_JobWriteEcho is the third layer of the write check,
 // hand-written beside the package (the configuration project's itest harness
 // cannot be imported across the module boundary): every writable key of the
 // body is written with a value of its own — on POST and again, changed, on

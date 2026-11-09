@@ -33,7 +33,7 @@ var pending = map[string]struct {
 // Under the daemon role there is no text of SQL to send over schema api —
 // every package reaches the database through pgtx.Call. A new raw query
 // anywhere outside the files of lib/pgtx (its subpackages included) is red
-// here, not a 500 on the stand.
+// here, not a 500 at run time.
 func TestNoTextOfSQLOutsidePgtx(t *testing.T) {
 	// methods that take (ctx, sql, …) on pgx, pgconn or database/sql
 	raw := map[string]bool{"Query": true, "QueryRow": true, "Exec": true, "SendBatch": true, "CopyFrom": true,

@@ -20,7 +20,7 @@ func live(t *testing.T) *resttest.Live {
 
 // seeded is the id of one row of the entity found through the generic list
 // of objects (api.list_object, open to a session): the list of the entity's
-// own is not in the allow list of every database (T839).
+// own is not in the allow list of every database.
 func seeded(t *testing.T, l *resttest.Live) string {
 	t.Helper()
 	search := `[{"field":"entitycode","compare":"EQL","value":"agent"}]`
@@ -76,12 +76,12 @@ func TestIntegration_AgentGet(t *testing.T) {
 // api.list_agent, and q= over the search fields. Both functions are in the
 // allow list or the route is refused 403 by the database (ERR-403-012) —
 // then the test says so and skips: the gateway's allow list is the database layer's
-// (T839), not this package's.
+// decision, not this package's.
 func TestIntegration_AgentList(t *testing.T) {
 	l := live(t)
 	rec := l.Call("GET", Prefix+"?page[limit]=1", "")
 	if refusedByAllowList(rec) {
-		t.Skipf("api.list_agent / api.count_agent are not in gateway.function of this database (T839): %s", rec.Body)
+		t.Skipf("api.list_agent / api.count_agent are not in gateway.function of this database: %s", rec.Body)
 	}
 	var p resttest.Page
 	if err := json.Unmarshal(rec.Body.Bytes(), &p); err != nil || rec.Code != 200 {
@@ -119,10 +119,10 @@ func TestIntegration_AgentList(t *testing.T) {
 // PATCH, read back through the package and through api.get_agent).
 // It waits for the allow list: api.add_agent and api.set_agent are not in
 // gateway.function and the daemon road refuses them (ERR-403-012) — the level
-// of the write is the database layer's decision, card T839; a hand-made fixture of it is
+// of the write is the database layer's decision; a hand-made fixture of it is
 // not made here. The shape of the write (the body's keys against the
 // catalogue's parameters) is checked without the database by the binary's
 // grid (TestGrid_WriteShape).
 func TestIntegration_AgentWriteEcho(t *testing.T) {
-	t.Skip("api.add_agent / api.set_agent are not in gateway.function until T839 (the level of write is the database layer's)")
+	t.Skip("api.add_agent / api.set_agent are not in gateway.function yet (the level of write is the database layer's)")
 }

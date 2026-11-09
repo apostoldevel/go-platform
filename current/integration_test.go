@@ -142,7 +142,7 @@ func TestIntegration_PatchMeLocaleAndOperDate(t *testing.T) {
 
 // The suite's packages run in parallel under one account: another session
 // of the same user logging in from another host and out again between the
-// two reads of the parity moved state/statetext/lc_ip (1 of 11 runs, T172).
+// two reads of the parity moved state/statetext/lc_ip (1 of 11 runs).
 // Done here on purpose, the parity must hold.
 func TestIntegration_MeParityUnderAnotherSessionOfTheUser(t *testing.T) {
 	l := live(t)

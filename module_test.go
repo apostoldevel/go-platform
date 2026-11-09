@@ -334,7 +334,7 @@ func TestUnknownRoute_404_ProblemJSON(t *testing.T) {
 func TestMalformedQuery_400_BeforeAnyRoute(t *testing.T) {
 	var seen pgtx.Session
 	h := host(t, platform.Config{}, fake{name: "x", pref: []string{"/api/v2/x"}, seen: &seen})
-	rec := do(h, "GET", "/api/v2/x?filter[username][like]=t303-probe-%&page[limit]=100", map[string]string{"Authorization": "Bearer " + token("s")})
+	rec := do(h, "GET", "/api/v2/x?filter[username][like]=probe-%&page[limit]=100", map[string]string{"Authorization": "Bearer " + token("s")})
 	if rec.Code != 400 {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
 	}
@@ -350,7 +350,7 @@ func TestMalformedQuery_400_BeforeAnyRoute(t *testing.T) {
 		t.Fatalf("semicolon: %d %s", rec.Code, rec.Body)
 	}
 	// a well-formed query still passes, encoded or not
-	for _, q := range []string{"?filter[username][like]=t303-probe-%25&page[limit]=100", "?filter%5Busername%5D%5Blike%5D=t303-probe-%25"} {
+	for _, q := range []string{"?filter[username][like]=probe-%25&page[limit]=100", "?filter%5Busername%5D%5Blike%5D=probe-%25"} {
 		if rec := do(h, "GET", "/api/v2/x"+q, map[string]string{"Authorization": "Bearer " + token("s")}); rec.Code != 200 {
 			t.Fatalf("%s: %d %s", q, rec.Code, rec.Body)
 		}

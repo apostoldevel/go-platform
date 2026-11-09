@@ -106,7 +106,7 @@ func TestIntegration_BadSessionIs401(t *testing.T) {
 	if p.Code == nil || *p.Code != problem.CodeLoginFailed || p.Type != "urn:apostol:error:unauthorized" {
 		t.Fatalf("code %v type %s", p.Code, p.Type)
 	}
-	// a bearer was presented and refused: RFC 6750 §3 invalid_token (T282)
+	// a bearer was presented and refused: RFC 6750 §3 invalid_token
 	rec := httptest.NewRecorder()
 	p.Write(rec, httptest.NewRequest("GET", "/api/v2/x", nil))
 	if got := rec.Header().Get("WWW-Authenticate"); !strings.HasPrefix(got, `Bearer error="invalid_token"`) {
@@ -289,7 +289,7 @@ func patched(t *testing.T) (*pgtx.Runner, func(t *testing.T) string) {
 	return r, mint
 }
 
-// A refusal decided by the handler (404 of a foreign object, T142) leaves
+// A refusal decided by the handler (404 of a foreign object) leaves
 // a row with the status and the session's user, and none of the handler's
 // work: the audit is the only thing committed.
 func TestIntegration_HandlerRefusalIsJournalledUnderTheSession(t *testing.T) {
