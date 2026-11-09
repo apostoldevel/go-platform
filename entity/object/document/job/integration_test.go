@@ -113,6 +113,9 @@ func call(h http.Handler, code, method, path, body string, hdr ...string) *httpt
 // the level of the function called is the allow list's, not the route's.
 func direct(t *testing.T, runner *pgtx.Runner, code, fn string, args pgtx.Args) []map[string]any {
 	t.Helper()
+	if gatewayClosed[fn] {
+		return adminRows(t, code, fn, args)
+	}
 	var out []map[string]any
 	err := runner.Do(context.Background(), pgtx.Session{Code: code, Token: tokens.Token(code), Agent: agent, Host: "127.0.0.1"}, &pgtx.Request{Method: "GET", Path: "/api/v2/me"}, func(ctx context.Context, tx pgx.Tx) error {
 		rows, err := pgtx.Call(ctx, tx, fn, args)
@@ -136,6 +139,51 @@ func direct(t *testing.T, runner *pgtx.Runner, code, fn string, args pgtx.Args) 
 	return out
 }
 
+// gatewayClosed are the reads a gateway allow list may leave closed to the
+// daemon role (a database that does not list list_scheduler / list_program
+// answers ERR-403-012 to them): the test takes a scheduler's id by its code on
+// the administrator's connection, in the session it was given.
+var gatewayClosed = map[string]bool{"list_scheduler": true, "list_program": true}
+
+// adminRows runs fn of schema api on the administrator's connection
+// (GO_TEST_ADMIN_DSN) in the session code, in a transaction it rolls back.
+func adminRows(t *testing.T, code, fn string, args pgtx.Args) []map[string]any {
+	t.Helper()
+	dsn := os.Getenv("GO_TEST_ADMIN_DSN")
+	if dsn == "" {
+		t.Skip("GO_TEST_ADMIN_DSN not set")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	// SessionIn answers NULL, not an error, for a session that is not valid
+	var entered *string
+	if err := conn.QueryRow(ctx, "SELECT SessionIn($1, $2, '127.0.0.1')::text", code, agent).Scan(&entered); err != nil || entered == nil {
+		t.Fatalf("%s: enter the session on the administrator's connection: %v (answer %v)", fn, err, entered)
+	}
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // a read; nothing to keep
+	rows, err := pgtx.Call(ctx, tx, fn, args)
+	if err != nil {
+		t.Fatalf("%s: %v", fn, err)
+	}
+	var out []map[string]any
+	for _, row := range rows {
+		var m map[string]any
+		if err := json.Unmarshal(row, &m); err != nil {
+			t.Fatalf("%s: a row that is not an object: %s", fn, row)
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
 // byCode is the id of the row of api.list_<x> whose code is code — the
 // schedulers and programs the platform's init seeds.
 func byCode(t *testing.T, runner *pgtx.Runner, session, list, code string) string {
@@ -148,15 +196,33 @@ func byCode(t *testing.T, runner *pgtx.Runner, session, list, code string) strin
 	return rows[0]["id"].(string)
 }
 
+// settledAfter is how old a row must be to count as settled: ten minutes by
+// default — longer than a run, shorter than a long-lived base's rows.
+// GO_TEST_SETTLED_AFTER (a Go duration) changes it; 0s on a throwaway base
+// nobody else touches, where the install's own rows are all there is.
+func settledAfter() time.Duration {
+	v := os.Getenv("GO_TEST_SETTLED_AFTER")
+	if v == "" {
+		return 10 * time.Minute
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < 0 {
+		panic(fmt.Sprintf("GO_TEST_SETTLED_AFTER=%q is not a non-negative Go duration (10m, 30s, 0s)", v))
+	}
+	return d
+}
+
 // pair is two settled rows of api.list_job in code order — two objects every
 // database has: the platform's init seeds the standard jobs.
 func pair(t *testing.T, runner *pgtx.Runner, session string) [2]string {
 	t.Helper()
-	cut := time.Now().Add(-10 * time.Minute).UTC().Format(time.RFC3339)
-	search, _ := json.Marshal([]map[string]any{{"field": "created", "compare": "LSS", "value": cut}})
+	search, _ := json.Marshal([]map[string]any{
+		{"field": "created", "compare": "LSS", "value": time.Now().Add(-settledAfter()).UTC().Format(time.RFC3339)},
+		{"field": "code", "compare": "PSN", "value": "^GO-"},
+	})
 	rows := direct(t, runner, session, "list_job", pgtx.Args{"search": json.RawMessage(search), "limit": 2, "offset": 0, "orderby": json.RawMessage(`["code ASC"]`)})
 	if len(rows) < 2 {
-		t.Fatalf("fewer than two settled rows of job: %d — seed two at least ten minutes before the run", len(rows))
+		t.Fatalf("fewer than two settled rows of job: %d — seed two older than %s (GO_TEST_SETTLED_AFTER) and not named GO-…", len(rows), settledAfter())
 	}
 	return [2]string{rows[0]["id"].(string), rows[1]["id"].(string)}
 }
