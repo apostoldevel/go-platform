@@ -161,6 +161,20 @@ func SessionOf(r *http.Request) pgtx.Session {
 	return s
 }
 
+// bearerToken is the token of an `Authorization: Bearer <token>` header. The
+// authentication scheme is case-insensitive (RFC 7235 §2.1) and separated from
+// the credentials by one or more spaces (1*SP); another scheme, a bare scheme
+// or nothing after the spaces is no bearer credential. The token itself is not
+// parsed here: whatever follows the spaces goes to Verify.
+func bearerToken(header string) (string, bool) {
+	scheme, rest, ok := strings.Cut(header, " ")
+	if !ok || !strings.EqualFold(scheme, "Bearer") {
+		return "", false
+	}
+	tok := strings.TrimLeft(rest, " ")
+	return tok, tok != ""
+}
+
 // ServeHTTP: request id, in-flight accounting, JWT, dispatch.
 func (h *host) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.cfg.InFlight != nil {
@@ -170,8 +184,8 @@ func (h *host) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if rid := r.Header.Get("X-Request-Id"); rid != "" {
 		w.Header().Set("X-Request-Id", rid)
 	}
-	tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if tok == "" || tok == r.Header.Get("Authorization") {
+	tok, ok := bearerToken(r.Header.Get("Authorization"))
+	if !ok {
 		h.unauthorized(problem.CodeLoginFailed, "Bearer token required").NoCredentials().Write(w, r)
 		return
 	}

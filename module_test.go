@@ -428,3 +428,58 @@ func TestPrefixes_ANestedPrefixIsCoveredByItsParent(t *testing.T) {
 		t.Fatalf("%v", got)
 	}
 }
+
+// RFC 7235 §2.1: the authentication scheme is case-insensitive. The
+// gateway reads the scheme so too and hands the host a canonical "Bearer"; a
+// request that reaches the host directly must not be refused for the case of
+// a word. credentials = auth-scheme 1*SP token68, so more than one space is
+// the same credential; only SP separates.
+func TestBearerScheme_CaseInsensitive(t *testing.T) {
+	var seen pgtx.Session
+	h := host(t, platform.Config{}, fake{name: "x", pref: []string{"/api/v2/x"}, seen: &seen})
+	tok := token("s")
+	for _, c := range []struct{ name, hdr string }{
+		{"canonical", "Bearer " + tok},
+		{"lower", "bearer " + tok},
+		{"upper", "BEARER " + tok},
+		{"mixed", "bEaReR " + tok},
+		{"two spaces", "Bearer  " + tok},
+	} {
+		seen = pgtx.Session{}
+		if rec := do(h, "GET", "/api/v2/x", map[string]string{"Authorization": c.hdr}); rec.Code != 200 {
+			t.Errorf("%s: %d %s", c.name, rec.Code, rec.Body.String())
+			continue
+		}
+		if seen.Token != tok || seen.Code != "s" {
+			t.Errorf("%s: session %+v", c.name, seen)
+		}
+	}
+	// a space and then a tab: the tab is part of the token, which does not verify
+	if rec := do(h, "GET", "/api/v2/x", map[string]string{"Authorization": "Bearer \t" + tok}); rec.Code != 401 {
+		t.Errorf("space then tab: %d, want 401", rec.Code)
+	}
+	// no bearer credential: 401 ERR-401-001 "Bearer token required", bare challenge
+	for _, c := range []struct{ name, hdr string }{
+		{"basic", "Basic " + tok},
+		{"scheme only", "bearer"},
+		{"no token", "bearer "},
+		{"longer scheme", "Bearerx " + tok},
+		{"scheme glued to token", "Bearer" + tok},
+		{"spaces only after the scheme", "Bearer   "},
+		{"tab instead of a space", "Bearer\t" + tok},
+		{"no-break space instead of a space", "Bearer\u00a0" + tok},
+		{"empty header", ""},
+	} {
+		rec := do(h, "GET", "/api/v2/x", map[string]string{"Authorization": c.hdr})
+		if rec.Code != 401 {
+			t.Errorf("%s: %d, want 401", c.name, rec.Code)
+			continue
+		}
+		if p := problemOf(t, rec); p["code"] != "ERR-401-001" || p["detail"] != "Bearer token required" {
+			t.Errorf("%s: %v", c.name, p)
+		}
+		if got := rec.Header().Get("WWW-Authenticate"); got != "Bearer" {
+			t.Errorf("%s: WWW-Authenticate %q, want bare Bearer", c.name, got)
+		}
+	}
+}
