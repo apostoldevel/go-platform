@@ -183,3 +183,28 @@ func TestClassify_DataExceptionIsTheClients(t *testing.T) {
 		t.Fatalf("%v", p)
 	}
 }
+
+// A row that changed under a REPEATABLE READ snapshot (SQLSTATE 40001) is the
+// If-Match writer's 412: the object moved on since it was read.
+func TestClassify_SerializationFailureIs412(t *testing.T) {
+	ser := &pgconn.PgError{Code: "40001", Message: "could not serialize access due to concurrent update"}
+	if _, _, kind := classify(ser); kind != kindSerialization {
+		t.Fatalf("kind %v", kind)
+	}
+	r := &Runner{}
+	var p *problem.Problem
+	if err := r.explain(context.Background(), &Request{Method: "PATCH"}, ser); !errors.As(err, &p) || p.Status != 412 || p.Type != "urn:apostol:error:precondition-failed" {
+		t.Fatalf("%v", err)
+	}
+	// a deadlock is not it
+	if _, _, kind := classify(&pgconn.PgError{Code: "40P01"}); kind == kindSerialization {
+		t.Fatal("40P01 taken for 40001")
+	}
+}
+
+// RepeatableRead marks the context; a plain one is not marked.
+func TestRepeatableRead_ContextFlag(t *testing.T) {
+	if repeatableRead(context.Background()) || !repeatableRead(RepeatableRead(context.Background())) {
+		t.Fatal("flag")
+	}
+}

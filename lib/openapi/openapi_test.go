@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/apostoldevel/go-platform/lib/numeric"
 )
 
 type inner struct {
@@ -16,17 +18,18 @@ type inner struct {
 
 type sample struct {
 	inner
-	ID      string     `json:"id" format:"uuid" doc:"The id."`
-	Name    *string    `json:"name" doc:"A name."`
-	Count   int32      `json:"count"`
-	Big     int64      `json:"big,omitempty"`
-	When    time.Time  `json:"when"`
-	Maybe   *time.Time `json:"maybe"`
-	Kind    string     `json:"kind" enum:"a,b"`
-	Tags    []string   `json:"tags"`
-	Raw     any        `json:"raw"`
-	Code    *string    `json:"code" required:"create"`
-	Skipped string     `json:"-"`
+	ID      string         `json:"id" format:"uuid" doc:"The id."`
+	Name    *string        `json:"name" doc:"A name."`
+	Count   int32          `json:"count"`
+	Big     int64          `json:"big,omitempty"`
+	When    time.Time      `json:"when"`
+	Maybe   *time.Time     `json:"maybe"`
+	Kind    string         `json:"kind" enum:"a,b"`
+	Tags    []string       `json:"tags"`
+	Raw     any            `json:"raw"`
+	Code    *string        `json:"code" required:"create"`
+	Amount  *numeric.Value `json:"amount"`
+	Skipped string         `json:"-"`
 	hidden  string
 }
 
@@ -44,7 +47,7 @@ func schemaOf(t *testing.T, mode Mode) map[string]any {
 func TestSchema_FromTags(t *testing.T) {
 	s := schemaOf(t, Row)
 	props := s["properties"].(map[string]any)
-	for _, k := range []string{"deep", "id", "name", "count", "big", "when", "maybe", "kind", "tags", "raw", "code"} {
+	for _, k := range []string{"deep", "id", "name", "count", "big", "when", "maybe", "kind", "tags", "raw", "code", "amount"} {
 		if _, ok := props[k]; !ok {
 			t.Errorf("property %s missing: %v", k, props)
 		}
@@ -55,14 +58,15 @@ func TestSchema_FromTags(t *testing.T) {
 		}
 	}
 	want := map[string]map[string]any{
-		"id":    {"type": "string", "format": "uuid", "description": "The id."},
-		"name":  {"type": []any{"string", "null"}, "description": "A name."},
-		"count": {"type": "integer", "format": "int32"},
-		"when":  {"type": "string", "format": "date-time"},
-		"maybe": {"type": []any{"string", "null"}, "format": "date-time"},
-		"kind":  {"type": "string", "enum": []any{"a", "b"}},
-		"raw":   {},
-		"tags":  {"type": "array", "items": map[string]any{"type": "string"}},
+		"id":     {"type": "string", "format": "uuid", "description": "The id."},
+		"name":   {"type": []any{"string", "null"}, "description": "A name."},
+		"count":  {"type": "integer", "format": "int32"},
+		"when":   {"type": "string", "format": "date-time"},
+		"maybe":  {"type": []any{"string", "null"}, "format": "date-time"},
+		"kind":   {"type": "string", "enum": []any{"a", "b"}},
+		"raw":    {},
+		"tags":   {"type": "array", "items": map[string]any{"type": "string"}},
+		"amount": {"type": []any{"number", "null"}},
 	}
 	for k, w := range want {
 		if !reflect.DeepEqual(props[k], w) {

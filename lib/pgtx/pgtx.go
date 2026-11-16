@@ -382,7 +382,11 @@ func (r *Runner) beginTimeout() time.Duration {
 func (r *Runner) begin(ctx context.Context) (pgx.Tx, error) {
 	bctx, cancel := context.WithTimeout(ctx, r.beginTimeout())
 	defer cancel()
-	tx, err := r.Pool.Begin(bctx)
+	opts := pgx.TxOptions{}
+	if repeatableRead(ctx) {
+		opts.IsoLevel = pgx.RepeatableRead
+	}
+	tx, err := r.Pool.BeginTx(bctx, opts)
 	if err != nil && r.Logger != nil {
 		// a refused start is a dead database or an exhausted pool; the pool's
 		// own counts tell which
@@ -390,6 +394,25 @@ func (r *Runner) begin(ctx context.Context) (pgx.Tx, error) {
 		r.Logger.Warn("transaction not started", "err", err, "acquired", st.AcquiredConns(), "idle", st.IdleConns(), "total", st.TotalConns(), "max", st.MaxConns())
 	}
 	return tx, err
+}
+
+type isoKey struct{}
+
+// RepeatableRead marks ctx so that Do runs the request transaction at
+// REPEATABLE READ instead of the default READ COMMITTED. A write that reads
+// the row, compares its ETag (If-Match) and then updates it needs it: the
+// transaction keeps one snapshot from the read to the update, so a row
+// committed by another request in between makes the update fail with
+// SQLSTATE 40001, which Do answers as 412 Precondition Failed. Without it
+// two requests carrying the same ETag would both pass the comparison and the
+// later write would silently replace the earlier one (a lost update).
+func RepeatableRead(ctx context.Context) context.Context {
+	return context.WithValue(ctx, isoKey{}, true)
+}
+
+func repeatableRead(ctx context.Context) bool {
+	v, _ := ctx.Value(isoKey{}).(bool)
+	return v
 }
 
 // Do runs fn inside the request transaction. The error returned is always a
@@ -542,12 +565,13 @@ func (r *Runner) journalRefusal(ctx context.Context, tx pgx.Tx, req *Request, st
 type kind int
 
 const (
-	kindProblem    kind = iota // already a *problem.Problem
-	kindCatalogue              // RAISE 'ERR-GGG-CCC: text'
-	kindRaise                  // RAISE without a catalogue code
-	kindConstraint             // SQLSTATE class 23: a constraint refused the client's data
-	kindData                   // SQLSTATE class 22: the client's data did not read (a bad uuid, a number out of range, bad base64)
-	kindInternal               // anything else
+	kindProblem       kind = iota // already a *problem.Problem
+	kindCatalogue                 // RAISE 'ERR-GGG-CCC: text'
+	kindRaise                     // RAISE without a catalogue code
+	kindConstraint                // SQLSTATE class 23: a constraint refused the client's data
+	kindData                      // SQLSTATE class 22: the client's data did not read (a bad uuid, a number out of range, bad base64)
+	kindSerialization             // SQLSTATE 40001: a row changed under a REPEATABLE READ snapshot since it was read
+	kindInternal                  // anything else
 )
 
 // classify sorts an error from inside the transaction.
@@ -562,6 +586,9 @@ func classify(err error) (code, detail string, k kind) {
 			return code, text, kindCatalogue
 		}
 		return "", pg.Message, kindRaise
+	}
+	if pg != nil && pg.Code == "40001" {
+		return pg.Code, pg.Message, kindSerialization
 	}
 	if pg != nil && strings.HasPrefix(pg.Code, "23") {
 		return pg.Code, pg.Message, kindConstraint
@@ -628,6 +655,10 @@ func (r *Runner) explain(ctx context.Context, req *Request, err error) error {
 			return problem.New(409, "conflict", "Conflict", detail)
 		}
 		return problem.New(400, "validation", "Bad request", detail)
+	case kindSerialization:
+		// the row this request read was committed by another request before
+		// this one wrote it: the ETag it compared is no longer current
+		return problem.New(412, "precondition-failed", "Precondition failed", "the object changed since it was read")
 	case kindData:
 		// what the database could not read as the type it expected is the
 		// client's to fix, not an internal failure — the same 400 v1 sends

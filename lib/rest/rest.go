@@ -429,6 +429,13 @@ func Precondition(r *http.Request) error {
 	return nil
 }
 
+// ConditionalCtx is the context of a request that reads a row, compares its
+// If-Match and writes: its transaction runs at REPEATABLE READ (see
+// pgtx.RepeatableRead), so two writes carrying the same ETag cannot both pass.
+func ConditionalCtx(r *http.Request) context.Context {
+	return pgtx.RepeatableRead(r.Context())
+}
+
 // IfMatch compares If-Match with the current row inside the transaction:
 // 412 when the row moved on since it was read.
 func IfMatch(r *http.Request, current json.RawMessage) error {

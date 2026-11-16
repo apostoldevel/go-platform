@@ -351,7 +351,7 @@ func (m *Module) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var row json.RawMessage
-	err = m.Doer.Do(r.Context(), platform.SessionOf(r), rest.ReqOf(r, 200, raw), func(ctx context.Context, tx pgx.Tx) error {
+	err = m.Doer.Do(rest.ConditionalCtx(r), platform.SessionOf(r), rest.ReqOf(r, 200, raw), func(ctx context.Context, tx pgx.Tx) error {
 		cur, err := m.Current(ctx, tx, id)
 		if err != nil {
 			return err

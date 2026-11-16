@@ -187,7 +187,7 @@ func (wr Writable) Update(d Doer, log *slog.Logger) http.HandlerFunc {
 			return
 		}
 		var row json.RawMessage
-		err = d.Do(r.Context(), platform.SessionOf(r), ReqOf(r, 200, wr.logged(raw)), func(ctx context.Context, tx pgx.Tx) error {
+		err = d.Do(ConditionalCtx(r), platform.SessionOf(r), ReqOf(r, 200, wr.logged(raw)), func(ctx context.Context, tx pgx.Tx) error {
 			current, err := wr.GetRow(ctx, tx, id)
 			if err != nil {
 				return err

@@ -36,6 +36,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/apostoldevel/go-platform/lib/numeric"
 	"github.com/apostoldevel/go-platform/lib/problem"
 )
 
@@ -489,6 +490,9 @@ func typeSchema(t reflect.Type) map[string]any {
 		return map[string]any{"type": "string", "format": "date-time"}
 	case t == reflect.TypeFor[json.RawMessage]():
 		return map[string]any{}
+	case t == reflect.TypeFor[numeric.Value]():
+		// an SQL numeric: a JSON number of any precision, no binary format
+		return map[string]any{"type": "number"}
 	}
 	switch t.Kind() {
 	case reflect.String:

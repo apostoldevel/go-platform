@@ -92,7 +92,7 @@ func patchHead(r *http.Request) (string, error) {
 
 func (m *module) patch(w http.ResponseWriter, r *http.Request, id string, raw []byte, update func(ctx context.Context, tx pgx.Tx, id string) error) {
 	var row json.RawMessage
-	err := m.cfg.Doer.Do(r.Context(), platform.SessionOf(r), rest.ReqOf(r, 200, redact(raw)), func(ctx context.Context, tx pgx.Tx) error {
+	err := m.cfg.Doer.Do(rest.ConditionalCtx(r), platform.SessionOf(r), rest.ReqOf(r, 200, redact(raw)), func(ctx context.Context, tx pgx.Tx) error {
 		current, err := users.GetRow(ctx, tx, id)
 		if err != nil {
 			return err
