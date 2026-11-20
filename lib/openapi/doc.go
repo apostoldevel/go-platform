@@ -79,6 +79,20 @@ func Page(item any) map[string]any {
 		}}
 }
 
+// PageMore is the answer of a list that has no count function: the rows of one
+// page, the limit and offset applied, and has_more — whether another page
+// follows. There is no total.
+func PageMore(item any) map[string]any {
+	return map[string]any{
+		"type": "object", "required": []any{"items", "limit", "offset", "has_more"},
+		"properties": map[string]any{
+			"items":    map[string]any{"type": "array", "items": item},
+			"limit":    map[string]any{"type": "integer", "description": "Page size applied."},
+			"offset":   map[string]any{"type": "integer", "description": "Rows skipped."},
+			"has_more": map[string]any{"type": "boolean", "description": "True when another page follows."},
+		}}
+}
+
 // Array is a plain array of items (an answer that is not paged).
 func Array(item any) map[string]any { return map[string]any{"type": "array", "items": item} }
 

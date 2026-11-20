@@ -109,3 +109,20 @@ func TestConformsBranches(t *testing.T) {
 	check("large whole number", `{"type":"integer"}`, `1e30`, true, "")
 	check("fraction", `{"type":"integer"}`, `0.5`, false, "is number")
 }
+
+func TestPageMore(t *testing.T) {
+	doc := map[string]any{}
+	page := PageMore(map[string]any{"type": "integer"})
+	if got := Conforms(doc, page, decode(t, `{"items":[1,2],"limit":2,"offset":0,"has_more":true}`)); len(got) != 0 {
+		t.Fatalf("an answer without total: %v", got)
+	}
+	for name, c := range map[string]struct{ body, want string }{
+		"total is not named": {`{"items":[],"limit":2,"offset":0,"has_more":false,"total":0}`, "has total"},
+		"has_more required":  {`{"items":[],"limit":2,"offset":0}`, "lacks has_more"},
+	} {
+		got := Conforms(doc, page, decode(t, c.body))
+		if len(got) == 0 || !strings.Contains(strings.Join(got, "\n"), c.want) {
+			t.Errorf("%s: want %q, got %v", name, c.want, got)
+		}
+	}
+}
