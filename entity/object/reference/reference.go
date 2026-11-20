@@ -20,6 +20,7 @@ package reference
 import (
 	platform "github.com/apostoldevel/go-platform"
 	"github.com/apostoldevel/go-platform/lib/entity"
+	"github.com/apostoldevel/go-platform/lib/openapi"
 	"github.com/apostoldevel/go-platform/lib/rest"
 )
 
@@ -29,15 +30,37 @@ const Prefix = "/api/v2/references"
 // Config wires the package.
 type Config = entity.Config
 
+// module is the form with its description: the guard's note on the writes and
+// what the database says of them.
+type module struct{ *entity.Module }
+
+// writesNote is what api.add_reference and api.update_reference do: both
+// refuse every connection but the kernel's before they look at the row, so
+// the create and the update of this package never succeed through the service.
+const writesNote = "api.add_reference and api.update_reference refuse every connection but the kernel's, so a create or an update through this route is refused."
+
+// Operations describes the form; the writes carry the guard's note and the
+// database's refusal.
+func (m module) Operations() []openapi.Operation {
+	ops := AdministratorWrites(m.Module.Operations())
+	for i, o := range ops {
+		if o.Method == "POST" && o.Path == Prefix || o.Method == "PATCH" {
+			ops[i].Description += "\n\n" + writesNote
+		}
+	}
+	return ops
+}
+
 // New returns the package as a platform.Module: the six routes of the form.
 func New(cfg Config) platform.Module {
-	return entity.New(entity.Entity{
+	return module{entity.New(entity.Entity{
 		Name:         "reference",
 		Prefix:       Prefix,
 		Resource:     rest.Resource{Prefix: Prefix, GetFn: "api.get_reference", ListFn: "api.list_reference", CountFn: "api.count_reference"},
 		SetFn:        "api.set_reference",
 		CreateFn:     "api.add_reference", // api.set_reference(NULL, …) is an upsert by code, not a create
 		NewBody:      func() rest.Body { return &body{} },
+		Row:          Row{},
 		SearchFields: []string{"code", "name"},
-	}, cfg)
+	}, cfg)}
 }

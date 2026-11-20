@@ -12,16 +12,16 @@ import (
 // before the database, as CheckJsonbKeys does in rest.<x>. The json keys are
 // the catalogue's parameter names without the p.
 type body struct {
-	Parent      *string `json:"parent"`
-	Type        *string `json:"type"`
-	Agent       *string `json:"agent"`
-	Code        *string `json:"code"`
-	Profile     *string `json:"profile"`
-	Address     *string `json:"address"`
-	Subject     *string `json:"subject"`
-	Content     *string `json:"content"`
-	Label       *string `json:"label"`
-	Description *string `json:"description"`
+	Parent      *string `json:"parent" format:"uuid" doc:"Parent object (UUID), or absent."`
+	Type        *string `json:"type" format:"uuid" required:"create" doc:"Type of the message (UUID of a type of the message entity; for example message.outbox). Required on create; no default is applied. On PATCH absent keeps the type."`
+	Agent       *string `json:"agent" format:"uuid" required:"create" doc:"Agent that delivers the message (UUID of an agent). Required on create."`
+	Code        *string `json:"code" required:"create" doc:"Code of the message: its business key. Required on create; on PATCH it may be absent (kept) but not emptied."`
+	Profile     *string `json:"profile" required:"create" doc:"Profile of the message on the agent (db.message.profile, NOT NULL). Required on create."`
+	Address     *string `json:"address" required:"create" doc:"Address of the message on the agent (db.message.address, NOT NULL). Required on create."`
+	Subject     *string `json:"subject" doc:"Subject of the message."`
+	Content     *string `json:"content" doc:"Content of the message."`
+	Label       *string `json:"label" doc:"Label of the message in the session's locale."`
+	Description *string `json:"description" doc:"Description of the message in the session's locale."`
 }
 
 // str is a text argument: nil for absent (keep), the value otherwise.

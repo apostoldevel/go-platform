@@ -12,12 +12,12 @@ import (
 // before the database, as CheckJsonbKeys does in rest.<x>. The json keys are
 // the catalogue's parameter names without the p.
 type body struct {
-	Parent      *string `json:"parent"`
-	Type        *string `json:"type"`
-	Code        *string `json:"code"`
-	Name        *string `json:"name"`
-	Body        *string `json:"body"`
-	Description *string `json:"description"`
+	Parent      *string `json:"parent" format:"uuid" doc:"Parent object (UUID), or absent."`
+	Type        *string `json:"type" format:"uuid" doc:"Type of the program (UUID of a type of the program entity). On create the type plpgsql.program is used when absent; on PATCH absent keeps the type."`
+	Code        *string `json:"code" required:"create" doc:"Code of the program: its business key. Required on create; on PATCH it may be absent (kept) but not emptied."`
+	Name        *string `json:"name" doc:"Name of the program in the session's locale."`
+	Body        *string `json:"body" required:"create" doc:"Text of the program: SQL the task scheduler runs as the system. Required on create; on PATCH it may be absent (kept) but not emptied."`
+	Description *string `json:"description" doc:"Description of the program in the session's locale."`
 }
 
 // str is a text argument: nil for absent (keep), the value otherwise.

@@ -41,6 +41,7 @@ func New(cfg Config) platform.Module {
 		SetFn:        "api.set_message",
 		CreateFn:     "api.add_message", // api.set_message(NULL, …) is an upsert by code, not a create
 		NewBody:      func() rest.Body { return &body{} },
+		Row:          Row{},
 		SearchFields: []string{"code", "subject"},
 	}, cfg)
 }

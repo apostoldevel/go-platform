@@ -168,14 +168,14 @@ const MaxFilesBody = 64 << 20
 // anyway. A negative size is a delete in the database (SetObjectFile) —
 // the delete form is DELETE.
 type fileBody struct {
-	Name *string `json:"name"`
-	Path *string `json:"path"`
-	Size *int32  `json:"size"`
-	Date *string `json:"date"`
-	Data *string `json:"data"`
-	Hash *string `json:"hash"`
-	Text *string `json:"text"`
-	Type *string `json:"type"`
+	Name *string `json:"name" required:"create" doc:"File name. Required; blank is refused."`
+	Path *string `json:"path" doc:"Path of the file; with the name it identifies the file on the object."`
+	Size *int32  `json:"size" doc:"Size in bytes. Not negative."`
+	Date *string `json:"date" doc:"Date of the file, a timestamp the database reads."`
+	Data *string `json:"data" doc:"Content of the file, base64."`
+	Hash *string `json:"hash" doc:"Hash of the content."`
+	Text *string `json:"text" doc:"Text of the file."`
+	Type *string `json:"type" doc:"Media type."`
 }
 
 // filesOf reads the body: a non-empty JSON array of files, every element an

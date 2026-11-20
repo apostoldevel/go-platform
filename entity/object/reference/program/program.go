@@ -20,7 +20,10 @@ package program
 import (
 	platform "github.com/apostoldevel/go-platform"
 	"github.com/apostoldevel/go-platform/lib/entity"
+	"github.com/apostoldevel/go-platform/lib/openapi"
 	"github.com/apostoldevel/go-platform/lib/rest"
+
+	"github.com/apostoldevel/go-platform/entity/object/reference"
 )
 
 // Prefix is what the package registers with the gateway.
@@ -29,15 +32,25 @@ const Prefix = "/api/v2/programs"
 // Config wires the package.
 type Config = entity.Config
 
+// module is the form with its description: the route guard of the prefix
+// leaves the writes to administrators, and the description says so.
+type module struct{ *entity.Module }
+
+// Operations describes the six routes of the form.
+func (m module) Operations() []openapi.Operation {
+	return reference.AdministratorWrites(m.Module.Operations())
+}
+
 // New returns the package as a platform.Module: the six routes of the form.
 func New(cfg Config) platform.Module {
-	return entity.New(entity.Entity{
+	return module{entity.New(entity.Entity{
 		Name:         "program",
 		Prefix:       Prefix,
 		Resource:     rest.Resource{Prefix: Prefix, GetFn: "api.get_program", ListFn: "api.list_program", CountFn: "api.count_program"},
 		SetFn:        "api.set_program",
 		CreateFn:     "api.add_program", // api.set_program(NULL, …) is an upsert by code, not a create
 		NewBody:      func() rest.Body { return &body{} },
+		Row:          Row{},
 		SearchFields: []string{"code", "name"},
-	}, cfg)
+	}, cfg)}
 }

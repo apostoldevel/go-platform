@@ -14,14 +14,14 @@ import (
 // before the database, as CheckJsonbKeys does in rest.<x>. The json keys are
 // the catalogue's parameter names without the p.
 type body struct {
-	Parent      *string `json:"parent"`
-	Type        *string `json:"type"`
-	Code        *string `json:"code"`
-	Name        *string `json:"name"`
-	Period      *string `json:"period"`
-	DateStart   *string `json:"datestart"`
-	DateStop    *string `json:"datestop"`
-	Description *string `json:"description"`
+	Parent      *string `json:"parent" format:"uuid" doc:"Parent object (UUID), or absent."`
+	Type        *string `json:"type" format:"uuid" doc:"Type of the scheduler (UUID of a type of the scheduler entity). On create the type job.scheduler is used when absent; on PATCH absent keeps the type."`
+	Code        *string `json:"code" required:"create" doc:"Code of the scheduler: its business key. Required on create; on PATCH it may be absent (kept) but not emptied."`
+	Name        *string `json:"name" doc:"Name of the scheduler in the session's locale."`
+	Period      *string `json:"period" doc:"Period between runs as an interval the database reads (for example 00:15:00 or 1 day); not checked before the database."`
+	DateStart   *string `json:"datestart" doc:"Time from which the scheduler fires: RFC 3339 or YYYY-MM-DD HH:MM:SS; anything else is refused with 400."`
+	DateStop    *string `json:"datestop" doc:"Time after which the scheduler stops firing: RFC 3339 or YYYY-MM-DD HH:MM:SS; anything else is refused with 400."`
+	Description *string `json:"description" doc:"Description of the scheduler in the session's locale."`
 }
 
 // str is a text argument: nil for absent (keep), the value otherwise.

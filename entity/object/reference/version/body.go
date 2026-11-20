@@ -12,11 +12,11 @@ import (
 // before the database, as CheckJsonbKeys does in rest.<x>. The json keys are
 // the catalogue's parameter names without the p.
 type body struct {
-	Parent      *string `json:"parent"`
-	Type        *string `json:"type"`
-	Code        *string `json:"code"`
-	Name        *string `json:"name"`
-	Description *string `json:"description"`
+	Parent      *string `json:"parent" format:"uuid" doc:"Parent object (UUID), or absent."`
+	Type        *string `json:"type" format:"uuid" doc:"Type of the version (UUID of a type of the version entity). On create the type api.version is used when absent; on PATCH absent keeps the type."`
+	Code        *string `json:"code" required:"create" doc:"Code of the version: its business key. Required on create; on PATCH it may be absent (kept) but not emptied."`
+	Name        *string `json:"name" doc:"Name of the version in the session's locale."`
+	Description *string `json:"description" doc:"Description of the version in the session's locale."`
 }
 
 // str is a text argument: nil for absent (keep), the value otherwise.
