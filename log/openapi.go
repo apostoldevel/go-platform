@@ -14,7 +14,7 @@ type UserLogRow struct {
 	Datetime  *string `json:"datetime" format:"date-time" doc:"Operating time of the entry."`
 	Timestamp *string `json:"timestamp" format:"date-time" doc:"Time the entry was written."`
 	Username  *string `json:"username" doc:"Login of the user the entry was written for."`
-	Session   *string `json:"session" doc:"Code of the session the entry was written in."`
+	Session   *string `json:"session" doc:"Code of the session the entry was written in; null where the database withholds it (a configuration may give no session code in a journal)."`
 	Code      *int32  `json:"code" doc:"Numeric code of the event."`
 	Scope     *string `json:"scope" doc:"Area of the system the event belongs to."`
 	Event     *string `json:"event" doc:"Name of the event."`

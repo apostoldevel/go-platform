@@ -5,9 +5,11 @@
 // the objects behind the notifications of a period, each read through its
 // entity's api.get_<entity> (v1 /notification/changed/objects).
 //
-// Every read is the caller's own: the *_my_notification functions (db-platform
-// 1.2.31) take the user from the session and filter by the tenant barrier;
-// the plain ones are an administrator's and are not called here.
+// Every read goes through the *_my_notification functions (db-platform
+// 1.2.31): they show an administrator every notification and anyone else those about
+// objects CheckObjectAccess lets the caller read inside the caller's area
+// (CheckObjectArea); the plain ones are an administrator's and are not called
+// here.
 package notification
 
 import (

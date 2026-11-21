@@ -11,7 +11,7 @@ import (
 type Row struct {
 	ID               string  `json:"id" format:"uuid" doc:"Identifier of the notification."`
 	Datetime         string  `json:"datetime" format:"date-time" doc:"Time of the notification."`
-	UserID           string  `json:"userid" format:"uuid" doc:"The user recorded with the notification."`
+	UserID           string  `json:"userid" format:"uuid" doc:"The user who triggered the action; shown to every caller who may see the notification."`
 	Object           string  `json:"object" format:"uuid" doc:"The object the notification is about."`
 	Entity           string  `json:"entity" format:"uuid" doc:"Entity of the object."`
 	EntityCode       string  `json:"entitycode" doc:"Code of the entity."`
