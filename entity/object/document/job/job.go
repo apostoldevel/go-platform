@@ -42,6 +42,7 @@ func New(cfg Config) platform.Module {
 		SetFn:        "api.set_job",
 		CreateFn:     "api.add_job", // api.set_job(NULL, …) is an upsert by code, not a create
 		NewBody:      func() rest.Body { return &body{} },
+		Row:          Row{},
 		SearchFields: []string{"code", "label"},
 	}, cfg)
 }
